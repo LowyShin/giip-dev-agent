@@ -77,6 +77,56 @@
 | `!klayer <キーワード>` | K-Layer 知識検索 |
 | `!help` | ヘルプ（主要コマンドを返信） |
 
+### 1-7. giip 連携コマンド（`giip ...`）
+
+giip サービスと連携するコマンド群です（チャンネル・DM 共通で動作。`giip-commands.js`）。
+
+**アカウント連携**（`giip account`）
+
+| コマンド | 動作 |
+| --- | --- |
+| `giip account set <login_id> <sk> [csn]` | このチャンネルの連携アカウントを設定（**SK を含むので DM 推奨**） |
+| `giip account set-default <login_id> <sk> [csn]` | 既定（default）アカウントを設定 |
+| `giip account show` | 現在の連携アカウント表示（SK は隠す） |
+
+**イシュー**（`giip issue`）
+
+| コマンド | 動作 |
+| --- | --- |
+| `giip issue list [status]` | イシュー一覧（連携アカウントの csn で絞り込み） |
+| `giip issue get <isn>`  （エイリアス: `show`） | イシュー詳細 |
+| `giip issue new "<title>"`  （エイリアス: `create`） | イシュー新規作成 |
+| `giip issue done <isn>` | ステータスを DONE に変更 |
+| `giip issue review <isn>` | ステータスを REVIEW に変更 |
+| `giip issue progress <isn>`  （エイリアス: `start`） | ステータスを IN_PROGRESS に変更 |
+| `giip issue comment <isn> <text>` | コメント追加 |
+
+**プロジェクト → CSN マッピング**（`giip project`、エイリアス: `proj` / `csn`）
+
+`<プロジェクト名> issue 登録 <内容>` がどの csn で登録されるかを管理します（`project-csn.json`、**Bot 再起動不要**）。giip アカウント設定とは独立。
+
+| コマンド | 動作 |
+| --- | --- |
+| `giip project set <プロジェクト名> <csn>`  （エイリアス: `add`） | プロジェクト名 ↔ csn を登録 |
+| `giip project list` | 登録済みマッピング一覧 |
+| `giip project del <プロジェクト名>`  （エイリアス: `delete` / `rm` / `remove`） | マッピング削除 |
+
+**チャンネル → 既定プロジェクト固定**（`giip channel`、エイリアス: `ch`）
+
+「このチャンネルの（接頭辞なし）発話はすべて `<プロジェクト>` として処理」する固定マッピング（`channel-project.json`、**Bot 再起動不要**）。明示的なプロジェクト接頭辞は引き続き優先されます。
+
+| コマンド | 動作 |
+| --- | --- |
+| `giip channel set <プロジェクト名> [チャンネルID]` | このチャンネル（または指定チャンネル）の既定プロジェクトを固定 |
+| `giip channel list` | 固定マッピング一覧（現在のチャンネルに `← 현재 채널` 表示） |
+| `giip channel del [チャンネルID]`  （エイリアス: `delete` / `rm` / `remove`） | 固定マッピング削除 |
+
+**汎用 API**（`giip api`）
+
+| コマンド | 動作 |
+| --- | --- |
+| `giip api <Verb> [jsondata]` | 任意の giip API を直接呼び出し |
+
 ---
 
 ## 2. DM（ダイレクトメッセージ）コマンド
@@ -92,6 +142,8 @@ DM では `@メンション` 不要。普通のメッセージは会話履歴付
 | `!reset` | 会話履歴をリセット |
 | `!help` | DM コマンド一覧を返信 |
 | `<14桁の番号>`  （`status <14桁>` も可） | その Task 番号の状況を照会 |
+
+> **giip 連携コマンド**（`giip account` / `giip issue` / `giip project` / `giip channel` / `giip api`）は DM でも同じく使えます。詳細は「1-7. giip 連携コマンド」を参照。特に `giip account set`（SK を含む）は DM での実行を推奨します。
 
 ---
 
