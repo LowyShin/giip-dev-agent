@@ -14,7 +14,7 @@
 - `/code-review`: 구현 리스크 점검
 - 아키텍트·SRE 서브에이전트: 운영/아키텍처 충돌 검토
 
-위 명령은 `24_available_skills.md`에 정의된 기존 명령만 사용한다.
+위 명령은 [`24_available_skills.md`](24_available_skills.md)에 정의된 기존 명령만 사용한다.
 
 ## 중단 작업 복귀 프로토콜
 장기 작업 재개 시 아래를 먼저 확인한다.
