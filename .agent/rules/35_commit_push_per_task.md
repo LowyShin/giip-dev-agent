@@ -18,7 +18,7 @@
    - 프로젝트에 **인증 래퍼 스크립트가 정의돼 있으면 그것을 사용**한다(직접 `git push` 대신).
    - 없으면 저장소에 설정된 정상 push 방법(SSH/PAT 등)으로 `git push`한다.
    - 기본 브랜치 히스토리를 재작성하는 force push는 명시적 지시 없이는 금지.
-3. push 성공 확인 후 완료 보고한다(파일 수정 시 [33_repo_url_in_report.md](33_repo_url_in_report.md)에 따라 원격 URL 포함).
+3. push 성공 확인 후 완료 보고한다(파일 수정 시 [37_repo_url_in_report.md](37_repo_url_in_report.md)에 따라 원격 URL 포함).
 
 ## Restore(되돌리기) 기준
 - 각 작업이 독립 커밋으로 남으므로, 문제가 생기면 해당 커밋 해시로 되돌린다.

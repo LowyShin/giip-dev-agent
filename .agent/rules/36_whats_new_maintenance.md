@@ -14,7 +14,7 @@
 ## 절차
 1. **항목 추가**: `## YYYY-MM-DD` 날짜 섹션(없으면 생성) 아래에 한 줄 요약을 추가한다.
    - 형식: `- **<제목>** — <한줄 설명>. → [관련 파일/문서 링크]`
-   - 문서를 수정/생성했으면 [규칙 33](33_repo_url_in_report.md)에 따라 링크를 건다.
+   - 문서를 수정/생성했으면 [규칙 37](37_repo_url_in_report.md)에 따라 링크를 건다.
    - 최신 날짜 섹션이 맨 위에 오도록 역순 정렬한다.
 2. **기준일 갱신**: 파일 상단의 `기준일 (as of): YYYY-MM-DD`를 오늘 날짜로 갱신한다.
 3. **7일 초과분 이관(prune)**: 오늘 기준 7일보다 오래된 날짜 섹션은 `WHATS_NEW.md`에서 제거하고,
@@ -26,5 +26,5 @@
 - 롤링 7일 창으로 항상 신선하게 유지하고, 오래된 항목은 `HISTORY.md`에 보존해 이력을 잃지 않는다.
 
 ## 관련 규칙
-- [33_repo_url_in_report.md](33_repo_url_in_report.md) — 문서 링크 URL 규칙
+- [37_repo_url_in_report.md](37_repo_url_in_report.md) — 문서 링크 URL 규칙
 - [35_commit_push_per_task.md](35_commit_push_per_task.md) — 태스크마다 커밋·push

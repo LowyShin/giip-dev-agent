@@ -22,8 +22,8 @@ The agent's behavior is governed by the following modular rule files in `.agent/
 
 ### Additional Operational Rules
 
-- **[Repo URL in Report](file:///.agent/rules/33_repo_url_in_report.md)**: Mandatory remote URLs in completion reports.
-- **[Edit Approval Policy](file:///.agent/rules/34_edit_approval_policy.md)**: Approval boundaries by file type.
+- **[Repo URL in Report](file:///.agent/rules/37_repo_url_in_report.md)**: Mandatory remote URLs in completion reports.
+- **[Edit Approval Policy](file:///.agent/rules/38_edit_approval_policy.md)**: Approval boundaries by file type.
 - **[Commit & Push per Task](file:///.agent/rules/35_commit_push_per_task.md)**: Mandatory task-unit commit/push discipline.
 - **[What's New Maintenance](file:///.agent/rules/36_whats_new_maintenance.md)**: Rolling 7-day update maintenance rule.
 
