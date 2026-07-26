@@ -6,19 +6,19 @@ This file defines the global rules and behaviors for the Agentic system. To impr
 
 The agent's behavior is governed by the following modular rule files in `.agent/rules/`:
 
-- **[Core Principles](file:///.agent/rules/00_core_principles.md)**: Fundamental rules (No raw SQL, Evidence First, Support).
-- **[Karpathy Guidelines](file:///.agent/rules/10_karpathy_guidelines.md)**: Behavioral guidelines for robust coding.
-- **[Structured Commit Protocol](file:///.agent/rules/11_structured_commit.md)**: Standardized git commit messages.
-- **[Workflow Guidelines](file:///.agent/rules/15_workflow_guidelines.md)**: Guidelines for TDD, Trace-first, and K-Layer.
-- **[Bkit Principles](file:///.agent/rules/20_bkit_core_principles.md)**: Bkit-specific core values.
-- **[PDCA Workflow](file:///.agent/rules/21_pdca_workflow.md)**: Detailed PDCA cycle steps.
-- **[Documentation Standards](file:///.agent/rules/22_documentation_standards.md)**: Folder structure and SoR priority.
-- **[Level System](file:///.agent/rules/23_level_system.md)**: Starter, Dynamic, and Enterprise levels.
-- **[Available Skills](file:///.agent/rules/24_available_skills.md)**: Command reference for PDCA, Gstack, etc.
-- **[Trigger Keywords](file:///.agent/rules/25_trigger_keywords.md)**: Multi-language keyword mappings.
-- **[Request Comprehension](file:///.agent/rules/32_request_comprehension.md)**: Request reinterpretation and ambiguity handling.
-- **[Artifact Hygiene](file:///.agent/rules/33_artifact_hygiene.md)**: SoR cleanup, duplicate removal, and iteration learning records.
-- **[Adversarial Review](file:///.agent/rules/34_adversarial_review.md)**: Opposing-view design checks and long-task resume protocol.
+1.  **[Core Principles](file:///.agent/rules/00_core_principles.md)**: Fundamental rules (No raw SQL, Evidence First, Support).
+2.  **[Karpathy Guidelines](file:///.agent/rules/10_karpathy_guidelines.md)**: Behavioral guidelines for robust coding.
+3.  **[Structured Commit Protocol](file:///.agent/rules/11_structured_commit.md)**: Standardized git commit messages.
+4.  **[Workflow Guidelines](file:///.agent/rules/15_workflow_guidelines.md)**: Guidelines for TDD, Trace-first, and K-Layer.
+5.  **[Bkit Principles](file:///.agent/rules/20_bkit_core_principles.md)**: Bkit-specific core values.
+6.  **[PDCA Workflow](file:///.agent/rules/21_pdca_workflow.md)**: Detailed PDCA cycle steps.
+7.  **[Documentation Standards](file:///.agent/rules/22_documentation_standards.md)**: Folder structure and SoR priority.
+8.  **[Level System](file:///.agent/rules/23_level_system.md)**: Starter, Dynamic, and Enterprise levels.
+9.  **[Available Skills](file:///.agent/rules/24_available_skills.md)**: Command reference for PDCA, Gstack, etc.
+10. **[Trigger Keywords](file:///.agent/rules/25_trigger_keywords.md)**: Multi-language keyword mappings.
+11. **[Request Comprehension](file:///.agent/rules/32_request_comprehension.md)**: Request reinterpretation and ambiguity handling.
+12. **[Artifact Hygiene](file:///.agent/rules/33_artifact_hygiene.md)**: SoR cleanup, duplicate removal, and iteration learning records.
+13. **[Adversarial Review](file:///.agent/rules/34_adversarial_review.md)**: Opposing-view design checks and long-task resume protocol.
 
 ### Additional Operational Rules
 
