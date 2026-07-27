@@ -1,0 +1,9 @@
+{
+  "GIIP_API_BASE": "https://giipfaw.azurewebsites.net/api",
+  "_comment": "실제 파일은 .secrets/giip-accounts.json (비커밋). SK 는 tCorpUser.uSecretKey. AK 는 저장하지 않는다(런타임 도출). 대화에서 'giip account set <login> <sk> [csn]' 로 갱신 가능.",
+  "default": { "login_id": "you@example.com", "sk": "<your-secret-key>", "csn": 47 },
+  "channels": {
+    "C0EXAMPLE1": { "login_id": "you@example.com", "sk": "<your-secret-key>", "csn": 47 },
+    "C0EXAMPLE2": { "login_id": "team@example.com", "sk": "<other-secret-key>", "csn": 70 }
+  }
+}

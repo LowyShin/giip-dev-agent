@@ -1,0 +1,7 @@
+{
+  "_comment": "Slack 채널ID → 기본 프로젝트명(소문자) 고정 매핑. 이 채널에서 오는 모든 메시지를 해당 프로젝트로 처리한다(작업 폴더 = PROJECTS_ROOT/<프로젝트명>, csn = project-csn.json[<프로젝트명>]). Rule 32(project prefix routing) 와의 우선순위: 메시지 선두에 실폴더 또는 project-csn.json 에 등록된 프로젝트 접두어가 명시되면 그 접두어가 이긴다(명시적 override, Rule 32 절대 규칙 유지). 접두어가 없을 때만 이 채널 고정 매핑이 기본값으로 적용된다(그렇지 않으면 lowyworkenv 로 폴백했을 자리를 채운다). 비밀 아님(채널ID·프로젝트명뿐) → git 추적. Slack `giip channel set <프로젝트명> [채널ID]` / `giip channel list` / `giip channel del [채널ID]` 로 편집(재시작 불필요). 해석: config.resolveChannelProject(channelId)/applyChannelPin(channelId, parsed). ⚠️ csn 라우팅이 실제로 먹으려면 봇 유저(uSn 29)가 그 csn 의 멤버여야 한다(tUserPerCorp) — 미가입이면 pApiGiipIssuePutbyAK 게이트가 홈 csn(47)으로 클램프한다. 멤버십은 `giip project set <프로젝트명> <csn>` 이 자동 부여한다.",
+  "map": {
+    "C0B71CYBZ0C": "ecokaku-aidc",
+    "C0BK27TSYVD": "ssm"
+  }
+}

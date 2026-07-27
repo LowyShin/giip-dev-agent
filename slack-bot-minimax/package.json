@@ -1,0 +1,17 @@
+{
+  "name": "giipclaude-bot",
+  "version": "2.0.0",
+  "description": "giipclaude Bot — claude CLI task workflow (no Anthropic API key needed)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@slack/socket-mode": "^2.0.7",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "bcryptjs": "^3.0.3",
+    "pg": "^8.21.0"
+  }
+}
