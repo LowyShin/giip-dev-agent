@@ -22,7 +22,7 @@ const { SocketModeClient } = require('@slack/socket-mode');
 // ── 機能別モジュール (index.js から behavior-preserving で切り出し) ───────────
 const config = require('./config');
 const { BOT_TOKEN, CHANNEL_IDS, SLACK_APP_TOKEN, AGENT_DIR, HISTORY_FILE, TASK_STATE_FILE } = config;
-const { loadJSON, saveJSON } = require('./state');
+const { loadJSON, saveJSON, isBotEngagedThread } = require('./state');
 const { slackGet } = require('./slack-api');
 const { onSlackMessage, drainNextQueued } = require('./handlers');
 
@@ -292,23 +292,39 @@ async function main() {
     return config.ALLOWED_USERS.includes(userId);
   };
 
+  // 채널 화이트리스트: 설정된 경우 등록되지 않은 채널의 입력은 무시(DM은 항상 허용, CHANNEL_IDS 무관).
+  const isAllowedChannel = (channelId) => {
+    if (config.CHANNEL_IDS.length === 0) return true;
+    return config.CHANNEL_IDS.includes(channelId);
+  };
+
   // チャンネルでの @mention (app_mention イベント)
   socketClient.on('app_mention', async ({ event, ack }) => {
     await safeAck(ack);
     if (!isAllowedUser(event.user)) return; // 발신자 검증
+    if (!isAllowedChannel(event.channel)) return; // 채널 검증
     console.log('[Bot] app_mention:', event.channel, (event.text || '').slice(0, 60));
     await onSlackMessage(event, conversations);
   });
 
   // DM・スレッド返信 (message イベント — message.im / message.channels 購読時)
   // @mention を含むチャンネルメッセージは app_mention で処理済みのためスキップ
-  // giip-773: 他のボットへの @mention 也有効 — 自分宛のみ app_mention で重複スキップ
+  // giip-773 の意図は「自分が(他ボットと並んで)メンションされたら答える」であって
+  // 「自分宛でなくても(他ボット宛/無メンションの雑談でも)反応する」ことではない。
+  // 元の実装は「自分宛メンションでなければ全部処理」になっており、同一チャンネルに同居する
+  // 別ボット宛のメッセージにまで反応して誤ったタスクを実行する事故につながる。
+  // 修正: 自分宛メンション(app_mention 側で処理済み)以外は、自分が既に関与したスレッドの
+  // 続きだけを処理する。
   socketClient.on('message', async ({ event, ack }) => {
     await safeAck(ack);
     if (!isAllowedUser(event.user)) return; // 발신자 검증
+    if (!isAllowedChannel(event.channel)) return; // 채널 검증
     const isDM = event.channel_type === 'im';
     const mentionsBot = config.getBotUserId() && (event.text || '').includes(`<@${config.getBotUserId()}>`);
-    if (!isDM && mentionsBot) return; // app_mention ハンドラで処理済み — 重複スキップ
+    if (!isDM) {
+      if (mentionsBot) return; // app_mention ハンドラで処理済み — 重複スキップ
+      if (!isBotEngagedThread(event.channel, event.thread_ts)) return; // 미관여 채널 발화는 무시
+    }
     console.log('[Bot] message:', event.channel_type, (event.text || '').slice(0, 60));
     await onSlackMessage(event, conversations);
   });
