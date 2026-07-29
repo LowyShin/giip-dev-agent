@@ -7,7 +7,7 @@ const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 async function fetchFromGitHub() {
   const token = process.env.GITHUB_TOKEN;
-  const repo = process.env.GITHUB_REPO; // owner/repo format, e.g. 'your-org/your-repo'
+  const repo = process.env.GITHUB_REPO; // e.g. 'LowyShin/smartorder-works'
 
   if (!token || !repo) return null;
 
@@ -17,7 +17,7 @@ async function fetchFromGitHub() {
       path: `/repos/${repo}/issues?state=open&per_page=30&sort=updated`,
       headers: {
         'Authorization': `Bearer ${token}`,
-        'User-Agent': 'giip-dev-agent-slack-bot/1.0',
+        'User-Agent': 'smartorder-slack-bot/1.0',
         'Accept': 'application/vnd.github.v3+json',
       },
     }, (res) => {

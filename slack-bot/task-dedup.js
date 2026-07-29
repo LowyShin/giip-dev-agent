@@ -1,8 +1,5 @@
-/**
- * task-dedup.js — タスクID抽出・類似判定・重複統合
- *
- * index.js から behavior-preserving に切り出したモジュール。
- */
+// task-dedup.js — 既存タスクID抽出 + 類似/重複タスク検出・統合
+// index.js から behavior-preserving で切り出し（ロジック変更なし）。
 
 const fs = require('fs');
 const path = require('path');
@@ -22,6 +19,25 @@ function extractExistingTaskIds(text) {
       path.join(AGENT_DIR, 'tasks', 'cancel', `${id}.md`),
     ].some(f => fs.existsSync(f));
   });
+}
+
+// ── 既存 giip issue 番号をメッセージから抽出 ─────────────────────────────────
+//   `admin/giip-issues/609`, `giip issue #609`, `issue 609`, `이슈 #609` 等から ISN を得る。
+//   ユーザ指摘(D): issue 番号が既にあるなら task 番号を新規発給せず、二重 issue(#610 等)も作らない。
+//   ISN は小さい整数(1〜6桁)に限定し、14桁タスクIDや電話番号等の誤検知を防ぐ。無ければ null。
+function extractGiipIssueRef(text) {
+  const t = String(text || '').replace(/`/g, '');
+  // issue/이슈/giip の明示的な文脈を必須にする(bare `#609` は `PR #123` 等の誤検知源なので拾わない)。
+  const patterns = [
+    /giip[-\s]?issues?\s*[/#]?\s*(\d{1,6})\b/i, // giip-issues/609, giip issue #609, giip issue 609
+    /\bissues?\s*#?\s*(\d{1,6})\b/i,            // issue #609, issue 609
+    /이슈\s*#?\s*(\d{1,6})\b/,                  // 이슈 609, 이슈 #609
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (m) return Number(m[1]);
+  }
+  return null;
 }
 
 // ── 類似 pending タスクを検索 ──────────────────────────────────────────────
@@ -104,7 +120,7 @@ function loadPendingTaskMeta() {
 }
 
 // ── 2つのタスクmetaが重複（類似）かを判定 ────────────────────────────────────
-// ブラケットキー一致 or 共有語 >= 2（generic な1語だけの誤マッチ防止）かつ 重なり率 >= 50%。
+// findSimilarPendingTasks と同じ発想: ブラケットキー一致 or 単語集合の重なり >= 50%。
 function tasksAreSimilar(a, b) {
   if (a.bracketKey && b.bracketKey && a.bracketKey === b.bracketKey) return true;
   const smaller = a.words.size <= b.words.size ? a.words : b.words;
@@ -112,6 +128,7 @@ function tasksAreSimilar(a, b) {
   if (smaller.size < 2) return false;
   let hits = 0;
   for (const w of smaller) if (larger.has(w)) hits++;
+  // 共有語 >= 2（generic な1語だけの誤マッチ防止）かつ 重なり率 >= 50%
   return hits >= 2 && hits / smaller.size >= 0.5;
 }
 
@@ -194,6 +211,7 @@ function applyTaskMerge(clusters, taskState) {
 
 module.exports = {
   extractExistingTaskIds,
+  extractGiipIssueRef,
   findSimilarPendingTasks,
   loadPendingTaskMeta,
   tasksAreSimilar,

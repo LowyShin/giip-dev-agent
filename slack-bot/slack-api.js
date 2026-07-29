@@ -1,13 +1,9 @@
-/**
- * slack-api.js — Slack API 呼び出しとスレッド読み取り
- *
- * index.js から behavior-preserving に切り出したモジュール。
- * BOT_USER_ID 参照は config.getBotUserId() に置換済み（挙動は同一）。
- */
+// slack-api.js — Slack Web API 呼び出し + メッセージ整形/スレッド取得
+// index.js から behavior-preserving で切り出し（ロジック変更なし）。
 
 const https = require('https');
 const config = require('./config');
-const { BOT_TOKEN, BOT_NAME } = config;
+const { BOT_TOKEN } = config;
 const { markThreadEngaged } = require('./state');
 
 // ── Slack API ─────────────────────────────────────────────────────────────────
@@ -75,13 +71,12 @@ async function postLong(channel, text, thread_ts) {
 // ── スレッド全体を読み取る (conversations.replies) ───────────────────────────
 // Bot は mention された1件のメッセージしか event で受け取らないため、スレッドの
 // 前後文脈は Slack API で明示的に取得しないと Claude からは全く見えない。
-// これを行わないと「이전 대화 기록이 없습니다 / no prior conversation」等の誤答になる。
-// 必要スコープ: channels:history / groups:history（本文）, users:read（話者の実名解決/任意）。
+// これを行わないと「이전 대화 기록이 없습니다」等の誤答になる（本 fix の主眼）。
 const _userNameCache = new Map();
 let _usersReadMissing = false; // users:read スコープ無し → users.info 呼び出しを打ち切る
 async function resolveUserName(userId) {
   if (!userId) return null;
-  if (config.getBotUserId() && userId === config.getBotUserId()) return BOT_NAME;
+  if (config.getBotUserId() && userId === config.getBotUserId()) return 'giipclaude';
   if (_userNameCache.has(userId)) return _userNameCache.get(userId);
   // users:read が無い環境では users.info が missing_scope になる。一度失敗したら
   // 以降は API を叩かず ID をそのまま話者ラベルにフォールバック（同一話者は同一IDで一貫）。
@@ -98,7 +93,7 @@ async function resolveUserName(userId) {
 // Slack メッセージ本文を人間可読テキストへ整形（mention/tel/url/装飾記号を除去）
 function cleanThreadText(t) {
   return (t || '')
-    .replace(/<@[A-Z0-9]+>/g, '@mention')
+    .replace(/<@[A-Z0-9]+>/g, '@멘션')
     .replace(/<tel:(\d+)\|[^>]*>/g, '$1')
     .replace(/<tel:(\d+)>/g, '$1')
     .replace(/<(https?:\/\/[^|>]+)\|[^>]*>/g, '$1')
@@ -108,7 +103,7 @@ function cleanThreadText(t) {
 }
 
 // threadTs のスレッド全体を「話者: 発言」形式のテキストで返す。取得不可なら ''。
-// 他の bot/app の発言も username 付きで含める。
+// 他の bot/app（giipgravity, Manus 등）の発言も username 付きで含める。
 async function fetchThreadTranscript(channelId, threadTs) {
   if (!threadTs) return '';
   const res = await slackGet('conversations.replies', {
@@ -124,7 +119,7 @@ async function fetchThreadTranscript(channelId, threadTs) {
     if (!name && m.user) name = await resolveUserName(m.user);
     if (!name) name = m.bot_id ? 'bot' : 'unknown';
     let body = cleanThreadText(m.text);
-    if (!body && m.files && m.files.length) body = `(attachment x${m.files.length})`;
+    if (!body && m.files && m.files.length) body = `(첨부파일 ${m.files.length}건)`;
     if (!body && m.attachments && m.attachments.length) {
       body = cleanThreadText(m.attachments.map(a => a.text || a.fallback || '').join(' '));
     }
@@ -133,57 +128,8 @@ async function fetchThreadTranscript(channelId, threadTs) {
   }
   let transcript = lines.join('\n');
   const MAX = 12000; // プロンプト肥大を防ぐ上限（超過分は古い側を切る）
-  if (transcript.length > MAX) transcript = '…(older messages truncated)\n' + transcript.slice(-MAX);
+  if (transcript.length > MAX) transcript = '…(앞부분 생략)\n' + transcript.slice(-MAX);
   return transcript;
-}
-
-// ── Read other threads referenced by URL (Method 2) ──────────────────────────
-// Detect Slack permalinks pasted in the message → read that channel/thread via
-// conversations.replies and inject it into the prompt. This is what lets a single
-// line "summarize this URL thread" pull in another thread (same or other channel).
-//   https://<workspace>.slack.com/archives/<channel>/p<16-digit ts>[?thread_ts=..]
-//     channel   = <channel>
-//     thread_ts = the ?thread_ts= value if present (thread root), else p<ts> → 10digits.6digits
-// Requires: the bot is a member of that channel AND has channels:history (public) /
-// groups:history (private) scope; otherwise the read fails gracefully.
-const SLACK_ARCHIVE_RE = /https?:\/\/[a-z0-9][a-z0-9.-]*\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})(?:\?\S*?thread_ts=(\d+\.\d+))?/gi;
-
-function parseSlackArchiveUrls(text) {
-  const out = [];
-  const seen = new Set();
-  SLACK_ARCHIVE_RE.lastIndex = 0;
-  let m;
-  while ((m = SLACK_ARCHIVE_RE.exec(text)) !== null) {
-    const channel = m[1];
-    // Reply link (?thread_ts=..) → use the root ts; otherwise use p<ts>.
-    const ts = m[4] ? m[4] : `${m[2]}.${m[3]}`;
-    const key = `${channel}:${ts}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ channel, ts, url: m[0] });
-  }
-  return out;
-}
-
-// Read every referenced URL and return a "▼ Referenced thread …" block string, or ''.
-// Skips the very thread being answered (already provided as current-thread context).
-async function fetchReferencedThreads(text, currentChannelId, currentThreadTs) {
-  const refs = parseSlackArchiveUrls(text);
-  if (!refs.length) return '';
-  const blocks = [];
-  for (const ref of refs) {
-    if (ref.channel === currentChannelId && currentThreadTs && ref.ts === currentThreadTs) continue;
-    let transcript = '';
-    try {
-      transcript = await fetchThreadTranscript(ref.channel, ref.ts);
-    } catch (e) {
-      console.error('[Bot] fetchReferencedThreads error:', e.message);
-    }
-    blocks.push(transcript
-      ? `▼ Referenced thread (${ref.url})\n${transcript}`
-      : `▼ Referenced thread (${ref.url})\n(could not read — the bot may not be a member of that channel, or lacks channels:history/groups:history scope.)`);
-  }
-  return blocks.join('\n\n');
 }
 
 module.exports = {
@@ -194,6 +140,4 @@ module.exports = {
   resolveUserName,
   cleanThreadText,
   fetchThreadTranscript,
-  parseSlackArchiveUrls,
-  fetchReferencedThreads,
 };

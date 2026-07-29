@@ -91,7 +91,9 @@ async function issueList(account, { status = '', csn = '' } = {}) {
   return res.body?.issues || [];
 }
 
-async function issueCreate(account, { title, content, status = 'IN_PROGRESS', csn, target_lssn = null, agent_workflow = null }) {
+// 생성 기본값은 PENDING(대기열). '생성'은 착수가 아니라 등록이므로, 무인 처리기(:20/:40, PENDING/READY만 픽업)가
+// 집을 수 있는 상태로 둔다. 착수(IN_PROGRESS)가 필요한 호출자(task 자동연동 등)는 status 를 명시적으로 넘긴다.
+async function issueCreate(account, { title, content, status = 'PENDING', csn, target_lssn = null, agent_workflow = null }) {
   const res = await issueApi(account, 'POST', {
     body: { title, content, status, csn: csn ?? account.csn, target_lssn, agent_workflow },
   });
@@ -130,6 +132,45 @@ async function issueComment(account, isn, content) {
   return res.body;
 }
 
+/**
+ * GET /giipIssueComments?isn= — 이슈의 모든 코멘트를 시간순(regdate ASC)으로 반환한다.
+ * giip issue 재처리 시 로컬 태스크 파일이 done/ 이동·타 클론 처리 등으로 없더라도
+ * DB(SSOT)에서 전체 코멘트 이력을 복원해 처리 맥락으로 쓰기 위한 조회 경로.
+ * 반환: [{ cSn, isn, content, author, issuetype, regdate }, ...]
+ */
+async function issueComments(account, isn) {
+  const base = account.apiBase || accounts.apiBase();
+  let ak = (await getAK(account)).ak;
+  const doGet = (token) =>
+    request('GET', `${base}/giipIssueComments?isn=${encodeURIComponent(isn)}`, {
+      headers: { 'x-api-key': token, 'Content-Type': 'application/json' },
+    });
+  let res = await doGet(ak);
+  if (res.status === 401) { ak = (await getAK(account, { force: true })).ak; res = await doGet(ak); }
+  if (res.status !== 200) throw new Error(`issueComments 실패: ${res.body?.error || res.status}`);
+  return res.body?.comments || [];
+}
+
+/**
+ * 봇 유저(SK→usn)를 @csn 의 멤버로 giip DB(tUserPerCorp)에 멱등 등록한다.
+ * → `giip project set <p> <csn>` 이 로컬 map 저장뿐 아니라 DB 멤버십까지 완결하게 해,
+ *   pApiGiipIssuePutbyAK 의 멤버십 게이트가 홈 CSN(47)으로 클램프하는 문제를 자동 해소한다.
+ * SP: pApiUserPerCorpGrantBotbySk (권한 게이트: 봇 계정 또는 기존 tCorpUserRel 멤버만, 대상=자기 자신).
+ * 호출: giipApiSk2  text="UserPerCorpGrantBot"  jsondata={"csn":<n>}  (ISN-161 auto-append 로 전달).
+ * @returns {{ ok:boolean, rstVal:number|null, already:boolean, msg:string, raw:any }}
+ */
+async function grantBotCsn(account, csn) {
+  const n = Number(csn);
+  if (!Number.isInteger(n)) throw new Error('csn 은 정수여야 합니다.');
+  const raw = await apiCall(account, 'UserPerCorpGrantBot', { csn: n });
+  // giipApiSk2 응답: { data: [ { RstVal, Proc_MSG, usn, csn, already } ], debug } 또는 { error }
+  const row = raw && Array.isArray(raw.data) ? raw.data[0] : null;
+  const rstVal = row && row.RstVal != null ? Number(row.RstVal) : null;
+  const already = !!(row && (row.already === true || row.already === 1));
+  const msg = (row && row.Proc_MSG) || (raw && raw.error) || (raw && raw.message) || '';
+  return { ok: rstVal === 200, rstVal, already, msg, raw };
+}
+
 /** 범용: 임의 giip API 를 giipApi 디스패처로 호출(text=Verb). */
 async function apiCall(account, verb, jsondata = null) {
   const base = account.apiBase || accounts.apiBase();
@@ -150,6 +191,8 @@ module.exports = {
   issueCreate,
   issueUpdate,
   issueComment,
+  issueComments,
   apiCall,
+  grantBotCsn,
   _akCache: akCache,
 };

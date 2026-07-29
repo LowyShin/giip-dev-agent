@@ -1,8 +1,5 @@
-/**
- * repo-status.js — git リポジトリの探索と push 状況チェック
- *
- * index.js から behavior-preserving に切り出したモジュール。
- */
+// repo-status.js — git リポジトリスキャン + push 状況チェック
+// index.js から behavior-preserving で切り出し（ロジック変更なし）。
 
 const fs = require('fs');
 const path = require('path');
@@ -76,8 +73,4 @@ function isPushFailureNotice(text) {
     || /作業完了[^\n]*git\s*push\s*失敗/i.test(text);
 }
 
-module.exports = {
-  discoverGitRepos,
-  checkAllRepoStatus,
-  isPushFailureNotice,
-};
+module.exports = { discoverGitRepos, checkAllRepoStatus, isPushFailureNotice };

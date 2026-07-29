@@ -1,8 +1,5 @@
-/**
- * state.js — JSON I/O とボット関与スレッド追跡
- *
- * index.js から behavior-preserving に切り出したモジュール。
- */
+// state.js — JSON I/O + ボット関与スレッド追跡
+// index.js から behavior-preserving で切り出し（ロジック変更なし）。
 
 const fs = require('fs');
 const { BOT_THREADS_FILE } = require('./config');
@@ -35,9 +32,4 @@ function isBotEngagedThread(channelId, threadTs) {
   return !!threads[`${channelId}:${threadTs}`];
 }
 
-module.exports = {
-  loadJSON,
-  saveJSON,
-  markThreadEngaged,
-  isBotEngagedThread,
-};
+module.exports = { loadJSON, saveJSON, markThreadEngaged, isBotEngagedThread };

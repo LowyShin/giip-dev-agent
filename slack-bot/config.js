@@ -11,6 +11,8 @@ const path = require('path');
 // ── 設定 ─────────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const CHANNEL_IDS = (process.env.SLACK_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+// SLACK_ALLOWED_USERS: Slack user ID whitelist (comma-separated). Empty = allow everyone.
+const ALLOWED_USERS = (process.env.SLACK_ALLOWED_USERS || '').split(',').map(s => s.trim()).filter(Boolean);
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
 
 const BOT_NAME        = process.env.BOT_NAME || 'giipclaude Bot'; // Slack 표시용 봇 이름 (BOT_NAME 환경변수로 변경 가능)
@@ -29,6 +31,12 @@ const CHANNEL_PROJECT_FILE = path.join(__dirname, 'channel-project.json');
 let botUserId = null;
 function getBotUserId() { return botUserId; }
 function setBotUserId(id) { botUserId = id; }
+
+// selfBotId: bot-to-bot conversation support — used to filter out the bot's own
+// messages (by bot_id) so it doesn't reply to itself in an infinite loop.
+let selfBotId = null;
+function getSelfBotId() { return selfBotId; }
+function setSelfBotId(id) { selfBotId = id; }
 
 // ── プロジェクトの .agent ディレクトリを解決 ─────────────────────────────────
 // workDir 内に .agent があればそれを使い、なければ BASE_DIR/.agent にフォールバック
@@ -219,6 +227,7 @@ function deleteChannelProject(channelId) {
 module.exports = {
   BOT_TOKEN,
   CHANNEL_IDS,
+  ALLOWED_USERS,
   SLACK_APP_TOKEN,
   BOT_NAME,
   BASE_DIR,
@@ -229,6 +238,8 @@ module.exports = {
   BOT_THREADS_FILE,
   getBotUserId,
   setBotUserId,
+  getSelfBotId,
+  setSelfBotId,
   getAgentDir,
   parseProjectPrefix,
   resolveProjectCsn,
