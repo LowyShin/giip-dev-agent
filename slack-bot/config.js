@@ -7,6 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // ── 設定 ─────────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -111,6 +112,30 @@ function readProjectCsnFile() {
 }
 function writeProjectCsnFile(obj) {
   fs.writeFileSync(PROJECT_CSN_FILE, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  autoCommitProjectCsnFile();
+}
+
+// `giip project set/del`은 로컬 디스크에만 fs.writeFileSync 하고 git에는 반영하지 않아,
+// 이 봇 프로세스가 실제로 돌아가는 호스트의 로컬 파일과 git 저장소가 조용히 어긋나는 문제가 있었다
+// (issue #821: giipprj로 명시했는데 map이 git상 {}로 비어있어 csn 33으로 폴백된 원인).
+// 파일이 바뀔 때마다 즉시 commit+push해서 두 상태를 동일하게 유지한다. 실패해도 map 저장 자체는
+// 이미 끝난 뒤라 치명적이지 않음 — 조용히 로그만 남긴다.
+function autoCommitProjectCsnFile() {
+  try {
+    const repoRoot = path.join(__dirname, '..');
+    const rel = 'slack-bot/project-csn.json';
+    spawnSync('git', ['add', rel], { cwd: repoRoot });
+    const commitRes = spawnSync('git', ['commit', '-m', 'chore(project-csn): giip project set/del 자동 반영'], { cwd: repoRoot });
+    if (commitRes.status === 0) {
+      const pushRes = spawnSync('git', ['push'], { cwd: repoRoot });
+      if (pushRes.status !== 0) {
+        console.error('[project-csn] git push 실패:', pushRes.stderr && pushRes.stderr.toString());
+      }
+    }
+    // commit status !== 0 인 경우 대부분 "변경사항 없음"(이미 최신) — 정상.
+  } catch (e) {
+    console.error('[project-csn] git 자동 커밋 실패:', e && e.message);
+  }
 }
 
 // 全マッピングを { name: csn } で返す。

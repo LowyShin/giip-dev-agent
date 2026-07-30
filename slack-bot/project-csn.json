@@ -1,4 +1,13 @@
 {
   "_comment": "Slack에서 처음 언급한 프로젝트명(소문자) → giip csn 매핑. '<프로젝트명> issue 등록 <내용>' 로 말하면 그 프로젝트의 csn 으로 giip issue 를 등록한다(예: 'caci-mimity issue 등록 ...' → csn 70422). 다수 프로젝트는 여기 map 에 항목만 추가하면 된다(코드 변경 불필요). 편집은 Slack 커맨드 `giip project set <프로젝트명> <csn>` / `giip project list` / `giip project del <프로젝트명>` 로도 가능(재시작 불필요). PROJECTS_ROOT 직하에 같은 이름 폴더가 있으면 그 폴더로 작업 전환도 되고, 폴더가 없어도 이 map 에 있으면 이름만으로 csn 라우팅된다(그 경우 workDir 은 BASE_DIR 로 안전 폴백). 여기에 없으면 account.csn(default)로 폴백. ⚠️ 새 csn 라우팅은 이 map 만으로 끝나지 않는다: 봇 계정의 유저(uSn)가 그 csn 의 멤버(giip DB 의 tUserPerCorp 테이블)여야 실제로 등록된다. 멤버십 행이 없으면 서버측 SP(pApiGiipIssuePutbyAK)의 멤버십 게이트가 봇의 홈 csn 으로 조용히 클램프한다 → issue 가 엉뚱한 csn 에 등록됨. 새 csn 을 열 때는 giip DB 에 tUserPerCorp(봇usn, 새csn) 한 줄을 함께 시드하라. 비밀 아님 → git 추적.",
-  "map": {}
+  "map": {
+    "lweb02": 2,
+    "ecokaku-aidc": 70417,
+    "caci-mimity": 70422,
+    "caci-aqchat": 70423,
+    "ssm": 70335,
+    "lowyworkenv": 33,
+    "giip-fde-agent": 70424,
+    "giipprj": 47
+  }
 }
