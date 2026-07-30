@@ -655,7 +655,11 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
 
         const specTitle = ((planContent && tm.extractTitle(planContent)) || title).slice(0, 200);
         // create 는 항상 PENDING 으로(유실 방지). 분석 성공 시에만 작업지시서 코멘트 + READY 로 승격.
-        const r = await giip.issueCreate(acct, { title: specTitle, content: body.slice(0, 8000), status: 'PENDING', csn: config.resolveProjectCsn(projectName || effWorkDir) });
+        // csn: projectName이 인식 안 되면 resolveProjectCsn은 null을 반환해야 한다(effWorkDir=BASE_DIR로
+        // 조용히 폴백해 엉뚱한 csn으로 새는 사고 방지, issue #813/#821 재발). 이 블록은 isGiipprj일 때만
+        // 도달하므로 명시적으로 47을 쓴다.
+        const csnForCreate = isGiipprj ? 47 : config.resolveProjectCsn(projectName);
+        const r = await giip.issueCreate(acct, { title: specTitle, content: body.slice(0, 8000), status: 'PENDING', csn: csnForCreate });
         const isn = r && r.isn ? Number(r.isn) : null;
         let promoted = false;
         if (isn && planContent) {
@@ -678,7 +682,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
       }
       // 그 외 프로젝트: 의뢰를 그대로 PENDING 으로 등록(무인 처리기가 refine 부터 수행).
       //   IN_PROGRESS 로 만들면 PENDING/READY 만 집는 처리기의 사각지대에 빠져 '먹통'이 된다.
-      const r = await giip.issueCreate(acct, { title, content: body.slice(0, 8000), status: 'PENDING', csn: config.resolveProjectCsn(projectName || effWorkDir) });
+      const r = await giip.issueCreate(acct, { title, content: body.slice(0, 8000), status: 'PENDING', csn: config.resolveProjectCsn(projectName) });
       const isn = r && r.isn ? Number(r.isn) : null;
       await postMessage(channelId,
         isn
@@ -1347,7 +1351,9 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     try {
       const gt = require('./giip-task');
       // csn 은 처음 언급한 프로젝트명(projectName, 폴더 없어도 해석) 기준(project-csn.json). 없으면 account.csn 폴백.
-      const res = await gt.maybeCreateIssue(channelId, taskTitle, planContent, config.resolveProjectCsn(projectName || workDir));
+      // (과거 `|| workDir` 폴백은 미해석 시 workDir=BASE_DIR이 우연히 map의 자기 프로젝트명과 매치돼
+      // 엉뚱한 csn으로 새는 버그였다 — issue #813/#821 원인, 제거)
+      const res = await gt.maybeCreateIssue(channelId, taskTitle, planContent, config.resolveProjectCsn(projectName));
       giipIsn = res.isn;
       giipIssueError = res.error;
     } catch (e) { console.error('[Bot] giip issue 등록 훅 오류:', e.message); }

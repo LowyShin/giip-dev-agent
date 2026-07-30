@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // ── 設定 ─────────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -104,6 +105,28 @@ function readProjectCsnFile() {
 }
 function writeProjectCsnFile(obj) {
   fs.writeFileSync(PROJECT_CSN_FILE, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  autoCommitFile('slack-bot-minimax/project-csn.json', 'chore(project-csn): giip project set/del 자동 반영');
+}
+
+// `giip project/channel set/del`이 로컬 디스크에만 fs.writeFileSync하고 git에는 반영 안 돼,
+// 이 봇이 돌아가는 호스트의 로컬 파일과 git 저장소가 조용히 어긋나는 문제 방지
+// (issue #821: giipprj로 명시했는데 map이 git상 비어있어 csn 33으로 폴백된 사고와 동일 계열).
+// 파일이 바뀔 때마다 즉시 commit+push. 실패해도 파일 저장 자체는 이미 끝난 뒤라 비치명적 —
+// 조용히 로그만 남긴다.
+function autoCommitFile(relPath, message) {
+  try {
+    const repoRoot = path.join(__dirname, '..');
+    spawnSync('git', ['add', relPath], { cwd: repoRoot });
+    const commitRes = spawnSync('git', ['commit', '-m', message], { cwd: repoRoot });
+    if (commitRes.status === 0) {
+      const pushRes = spawnSync('git', ['push'], { cwd: repoRoot });
+      if (pushRes.status !== 0) {
+        console.error(`[${relPath}] git push 실패:`, pushRes.stderr && pushRes.stderr.toString());
+      }
+    }
+  } catch (e) {
+    console.error(`[${relPath}] git 자동 커밋 실패:`, e && e.message);
+  }
 }
 
 // 全マッピングを { name: csn } で返す。
@@ -190,6 +213,7 @@ function readChannelProjectFile() {
 }
 function writeChannelProjectFile(obj) {
   fs.writeFileSync(CHANNEL_PROJECT_FILE, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  autoCommitFile('slack-bot-minimax/channel-project.json', 'chore(channel-project): giip channel set/del 자동 반영');
 }
 function listChannelProject() { return loadChannelProjectMap(); }
 // channelId → プロジェクト名 を追加/更新。プロジェクト名は小文字化して保存。
