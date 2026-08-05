@@ -81,16 +81,28 @@ function parseProjectPrefix(text) {
   return { workDir: BASE_DIR, cleanText: text, projectName: null };
 }
 
+// マッピング JSON ファイルを読み込んで parse する共通ヘルパ。
+// ファイル未存在（ENOENT）は正常ケース（新規インストール等）として静かに null を返すが、
+// ファイルは在るのに JSON が壊れている／読めない（ディスク障害・同時書き込み衝突・手動編集ミス等）
+// 場合は console.error で警告を残す。黙って空マッピングにフォールバックすると、プロジェクト／
+// チャンネル対応が全部消えたように動きながら何のログも残らず原因究明が遅れるため（issue #885）。
+function readMappingJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') {
+      console.error(`[config] 매핑 파일 파싱/읽기 실패 (${file}): ${e && e.message}`);
+    }
+    return null;
+  }
+}
+
 // ── プロジェクト名 → giip csn マッピング（project-csn.json 駆動） ──────────────
 // `<プロジェクト名> issue 등록 <内容>` を、そのプロジェクトの csn で登録するための対応表。
 // ハードコードせず project-csn.json で管理し、呼び出しごとに読み直す（再起動なしで反映）。
 function loadProjectCsnMap() {
-  try {
-    const j = JSON.parse(fs.readFileSync(PROJECT_CSN_FILE, 'utf8'));
-    return (j && j.map) || {};
-  } catch {
-    return {};
-  }
+  const j = readMappingJson(PROJECT_CSN_FILE);
+  return (j && j.map) || {};
 }
 
 // workDir（またはプロジェクト名）→ csn(Number) or null。未登録なら null を返し、
@@ -106,12 +118,8 @@ function resolveProjectCsn(workDirOrName) {
 // _comment 等 map 以外のフィールドを保存したまま map だけ更新する。読み込みは
 // loadProjectCsnMap と同じく毎回読み直すので再起動なしで即時反映される。
 function readProjectCsnFile() {
-  try {
-    const j = JSON.parse(fs.readFileSync(PROJECT_CSN_FILE, 'utf8'));
-    return (j && typeof j === 'object') ? j : {};
-  } catch {
-    return {};
-  }
+  const j = readMappingJson(PROJECT_CSN_FILE);
+  return (j && typeof j === 'object') ? j : {};
 }
 function writeProjectCsnFile(obj) {
   fs.writeFileSync(PROJECT_CSN_FILE, JSON.stringify(obj, null, 2) + '\n', 'utf8');
@@ -174,12 +182,8 @@ function deleteProjectCsn(name) {
 // 「このチャンネルの発話はすべて <project> として扱う」を実現する。project-csn.json と同じく
 // 呼び出しごとに読み直す（再起動なしで反映）。giip csn とは独立に channelId → プロジェクト名を持つ。
 function loadChannelProjectMap() {
-  try {
-    const j = JSON.parse(fs.readFileSync(CHANNEL_PROJECT_FILE, 'utf8'));
-    return (j && j.map) || {};
-  } catch {
-    return {};
-  }
+  const j = readMappingJson(CHANNEL_PROJECT_FILE);
+  return (j && j.map) || {};
 }
 
 // channelId → プロジェクト名(小文字) or null。未登録なら null。
@@ -214,12 +218,8 @@ function applyChannelPin(channelId, parsed) {
 
 // ── channel-project.json の読み書き（Slack `giip channel` コマンドから利用） ────
 function readChannelProjectFile() {
-  try {
-    const j = JSON.parse(fs.readFileSync(CHANNEL_PROJECT_FILE, 'utf8'));
-    return (j && typeof j === 'object') ? j : {};
-  } catch {
-    return {};
-  }
+  const j = readMappingJson(CHANNEL_PROJECT_FILE);
+  return (j && typeof j === 'object') ? j : {};
 }
 function writeChannelProjectFile(obj) {
   fs.writeFileSync(CHANNEL_PROJECT_FILE, JSON.stringify(obj, null, 2) + '\n', 'utf8');
