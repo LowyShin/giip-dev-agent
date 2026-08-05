@@ -92,6 +92,28 @@ task-template: "[Code-Review] {feature}"
 - **Injection**: Ensure all inputs are parameterized or properly escaped.
 - **Schema Integrity**: Verify foreign keys, constraints, and migration scripts.
 
+## External Tool: ocr delegate (Alibaba OpenCodeReview)
+
+Before writing the manual review, pull the deterministic rule checklist from `ocr delegate`
+(Apache-2.0, `github.com/alibaba/open-code-review`) and use it as a first pass alongside the
+categories above. `ocr delegate` makes **no LLM call and needs no API key** — it only prints a
+rule checklist — so it is safe to run unconditionally as a zero-cost supplement.
+
+```bash
+# no install needed; fetched on demand via npx
+npx -y -p @alibaba-group/open-code-review ocr delegate preview --from main --to HEAD
+npx -y -p @alibaba-group/open-code-review ocr delegate rule <file1> <file2> ...
+```
+
+- `ocr delegate preview` lists which files changed in a diff range (or the workspace, with no
+  flags) so you know what to run `rule` against without guessing.
+- `ocr delegate rule` prints the rule set applicable to the given files (grouped by content:
+  JS/TS, React, security, DB, etc.) — treat it as a checklist, not a finished review. Check each
+  item against the target files yourself and report violations under the matching category
+  (Code Quality / Security / etc.) below.
+- If `npx` or network access is unavailable, skip this step and proceed with the categories
+  above only — it's a supplement, not a hard dependency.
+
 ## Review Output Format
 
 ```
@@ -154,6 +176,7 @@ code-analyzer Agent uses confidence-based filtering:
 
 - **Phase**: Check (Quality verification)
 - **Trigger**: Auto-suggested after implementation
+- **First pass**: `ocr delegate` rule checklist (see External Tool section above)
 - **Output**: docs/03-analysis/code-review-{date}.md
 
 

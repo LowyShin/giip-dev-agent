@@ -180,6 +180,14 @@ API 테스트 도구입니다.
 - **다운로드**: [Postman](https://www.postman.com/downloads/)
 - **용도**: REST API 테스트 및 문서화
 
+### 4. ocr (OpenCodeReview CLI)
+`/code-review` 스킬(Check 단계)이 첫 패스로 사용하는 결정론적 규칙 체크리스트 도구입니다.
+
+- **레포**: [alibaba/open-code-review](https://github.com/alibaba/open-code-review) (Apache-2.0)
+- **설치 불필요**: `npx -y -p @alibaba-group/open-code-review ocr delegate rule <file...>`
+- **특징**: `delegate` 서브커맨드는 LLM 호출·API 키 없이 규칙 체크리스트만 출력 — 별도 계정/과금 없음
+- **용도**: JS/TS·React·보안(XSS/인젝션 등) 규칙을 기계적으로 먼저 훑고, 나머지는 에이전트가 직접 판단
+
 ---
 
 ## 📚 API Key 발급 가이드
