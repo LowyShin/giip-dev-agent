@@ -44,7 +44,7 @@ Remember: Claude is capable of extraordinary creative work. Don't hold back, sho
 
 ## Forbidden AI Tells (anti-slop)
 
-> Adapted from taste-skill (MIT © Leonxlnx, <https://github.com/Leonxlnx/taste-skill>). These are **mechanical FAIL conditions**, not aesthetic judgment calls — if any appears, the work is not done.
+> Adapted from taste-skill (MIT © Leonxlnx, <https://github.com/Leonxlnx/taste-skill>; core rules + `gpt-tasteskill` and `image-to-code-skill` sub-skills). These are **mechanical FAIL conditions**, not aesthetic judgment calls — if any appears, the work is not done.
 
 - **Em-dash (—) in visible UI copy: 0 allowed** (non-negotiable). Use commas, periods, or restructure the sentence.
 - No "hero version labels" (v2.0, Beta badges) unless functionally required.
@@ -59,6 +59,9 @@ Remember: Claude is capable of extraordinary creative work. Don't hold back, sho
 - Bento / grid layouts: no empty filler cells.
 - Contrast: meet **WCAG AA** (text 4.5:1, large text/UI 3:1).
 - Fonts: never Inter / Roboto / Arial / system as the *deliberate* choice.
+- Hero H1: **2-3 lines max** — 4+ lines is a fail. Use a wide container and fluid font sizing, not a shrunk headline.
+- No "cards inside cards inside cards": avoid nested-wrapper compartmentalization; prefer open composition with intentional spacing.
+- No decorative pills, fake system badges, or pseudo-technical micro-labels unless functionally required; cut filler CTA verbs ("Unleash", "Transform", "Empower") used as generic copy padding.
 
 ## Pre-Flight Check (pass/fail)
 
@@ -74,6 +77,8 @@ Remember: Claude is capable of extraordinary creative work. Don't hold back, sho
 - [ ] WCAG AA contrast on text and interactive elements.
 - [ ] Motion is intentional (a page-load stagger or purposeful micro-interactions), not scattered.
 - [ ] Responsive: no horizontal body scroll at mobile widths.
+- [ ] Hero H1 fits within 2-3 lines.
+- [ ] No nested-box (card-in-card-in-card) compartmentalization.
 
 **Scope / stack note**: taste-skill assumes Next.js + Tailwind v4 + Motion. Our work also includes static sites and blogs (e.g. lweb02, LowyOpinion), so apply the **stack-independent** rules above (anti-tells, accessibility, copy audit, layout discipline) and skip framework-specific mandates that don't fit the target. Dashboards, data tables, and multi-step forms are out of scope for this skill — reach for purpose-built libraries there.
 
