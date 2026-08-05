@@ -51,9 +51,12 @@ function getAgentDir(workDir) {
 // そのフォルダを workDir として返し、プレフィックスを除去した本文を返す
 function parseProjectPrefix(text) {
   const words = text.trim().split(/\s+/);
-  if (words.length < 1) return { workDir: BASE_DIR, cleanText: text, projectName: null };
+  // '' も /\s+/ split で [''] (length 1) になるため、length チェックだけでは空/空白入力を
+  // 弾けない — raw が空文字のケースを明示的にガードする(空文字は PROJECTS_ROOT 自体に
+  // path.join されて existsSync が true になり、意図せず workDir が切り替わっていた)。
+  const raw = words[0] || '';
+  if (!raw) return { workDir: BASE_DIR, cleanText: text, projectName: null };
   // 助詞・接尾語を除去してプロジェクト名を抽出 (giipprj에서 → giipprj)
-  const raw = words[0];
   const candidate = raw.toLowerCase().replace(/(에서|에서는|에서도|에서만|에게서|한테서|의|에|는|이|가|를|을|로|으로|와|과|도|만|까지|부터|처럼|라고|이라고|에서라도|에도)$/u, '');
   const projectDir = path.join(PROJECTS_ROOT, candidate);
   // 認識したプレフィックス（助詞含む）を除いた本文を返すヘルパ
