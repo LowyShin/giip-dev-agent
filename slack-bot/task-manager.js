@@ -10,6 +10,7 @@ const { searchKLayer } = require('./k-layer');
 const accounts = require('./claude-accounts');
 const minimax = require('./minimax-accounts');
 const { acquireRepoLock, releaseRepoLock } = require('./repo-lock');
+const config = require('./config'); // giip-974: 프로젝트별 응답 언어(resolveLangNameForProject)
 
 const BASE_DIR = path.join(__dirname, '..');
 const TASKS_DIR = path.join(BASE_DIR, '.agent', 'tasks');
@@ -243,7 +244,7 @@ function analyzeRequest(requestText, taskId, baseDir = BASE_DIR) {
   const selected = selectContextFiles(requestText, catalog, baseDir);
   const { context: rolesContext, filesRead } = readSelectedContext(selected, baseDir);
 
-  const analysisPrompt = `You are a senior software architect. Always respond in Korean.
+  const analysisPrompt = `You are a senior software architect. Always respond in ${config.resolveLangNameForProject(projectName)}.
 
 Working project: ${projectName}
 Working directory: ${baseDir}
@@ -413,7 +414,7 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
   pwsh -File "${addCommentScript}" -isn ${isn} -content "<본문>" -issuetype note -author "slack-bot"
   (중간 진행은 issuetype=note. 상태 전이/최종 코멘트는 봇이 별도 처리하므로 여기서 상태는 바꾸지 말 것.)
 ` : '';
-  const executionPrompt = `You are a senior software engineer working in the Lowyworkenv workspace. Always respond in Korean.
+  const executionPrompt = `You are a senior software engineer working in the Lowyworkenv workspace. Always respond in ${config.resolveLangNameForProject(path.basename(baseDir))}.
 Working directory: ${baseDir}
 Current branch: ${currentBranch} (task 전용 브랜치, base=${baseBranch} 최신 기준)
 

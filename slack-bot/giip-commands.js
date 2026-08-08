@@ -64,6 +64,37 @@ async function handleGiipCommand(rawText, channelId) {
   //   giip 계정과 무관하므로 account 확인 게이트보다 먼저 처리한다.
   //   `<프로젝트명> issue 등록 <내용>` 이 어떤 csn 으로 등록되는지를 여기서 관리.
   if (sub === 'project' || sub === 'proj' || sub === 'csn') {
+    // ── giip project lang ... — 프로젝트별 AI 응답 언어 관리(project-lang.json, 재시작 불필요) ──
+    //   giip-974: "Always respond in Korean" 전역 하드코딩을 대체 — 미등록 프로젝트는 ko 로 폴백.
+    const langMatch = rest.match(/^lang\s+(set|del|delete|rm|remove|list|ls|show)?\s*([\s\S]*)$/i);
+    if (langMatch) {
+      const langAction = (langMatch[1] || 'list').toLowerCase();
+      const largs = (langMatch[2] || '').trim();
+      const LANG_USAGE = '사용법: `giip project lang set <프로젝트명> <언어코드(ko/ja/en/zh-CN/zh-TW)>` | `giip project lang list` | `giip project lang del <프로젝트명>`';
+      try {
+        if (langAction === 'set') {
+          const sm = largs.match(/^(\S+)\s+(\S+)$/);
+          if (!sm) return { handled: true, text: LANG_USAGE };
+          const { name, lang } = config.setProjectLang(sm[1], sm[2]);
+          return {
+            handled: true,
+            text: `✅ 프로젝트 언어 설정 저장: \`${name}\` → \`${lang}\`\n이제 \`${name}\` 프로젝트의 AI 응답은 이 언어로 지정됩니다(봇 재시작 불필요).`,
+          };
+        }
+        if (langAction === 'del' || langAction === 'delete' || langAction === 'rm' || langAction === 'remove') {
+          const name = largs.split(/\s+/)[0];
+          if (!name) return { handled: true, text: LANG_USAGE };
+          const ok = config.deleteProjectLang(name);
+          return { handled: true, text: ok ? `✅ 언어 설정 삭제: \`${name.toLowerCase()}\`(기본값 ko로 폴백)` : `⚠️ \`${name.toLowerCase()}\` 언어 설정이 없습니다.` };
+        }
+        const lmap = config.listProjectLang();
+        const lkeys = Object.keys(lmap);
+        const lbody = lkeys.length ? lkeys.map((k) => `• \`${k}\` → \`${lmap[k]}\``).join('\n') : '(등록된 언어 설정 없음, 전부 기본값 ko)';
+        return { handled: true, text: `📋 프로젝트 → 응답언어 매핑 (project-lang.json)\n${lbody}\n\n${LANG_USAGE}` };
+      } catch (e) {
+        return { handled: true, text: `❌ ${e.message}\n${LANG_USAGE}` };
+      }
+    }
     const pm = rest.match(/^(set|add|del|delete|rm|remove|list|ls|show)?\s*([\s\S]*)$/i);
     const action = (pm && pm[1] ? pm[1].toLowerCase() : 'list');
     const pargs = pm ? (pm[2] || '').trim() : '';

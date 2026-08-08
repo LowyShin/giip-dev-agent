@@ -27,6 +27,7 @@ const TASK_STATE_FILE = path.join(__dirname, '.task-state.json');
 const BOT_THREADS_FILE = path.join(__dirname, '.bot-threads.json');
 const PROJECT_CSN_FILE = path.join(__dirname, 'project-csn.json');
 const CHANNEL_PROJECT_FILE = path.join(__dirname, 'channel-project.json');
+const PROJECT_LANG_FILE = path.join(__dirname, 'project-lang.json');
 
 // ── botUserId (main() で auth.test 後にセット、processMessage / socket handler で参照) ──
 let botUserId = null;
@@ -165,6 +166,67 @@ function setProjectCsn(name, csn) {
   return { name: key, csn: n };
 }
 
+// ── プロジェクト名 → 応答言語(lang code) マッピング（project-lang.json 駆動） ──────────
+// giip-974: lowyworkenv/slack-bot과 동일 패턴(별도 독립 코드베이스, 공유 패키지화하지 않음).
+// 미등록 project는 DEFAULT_LANG('ko')로 폴백 — 기존 "Always respond in Korean" 동작과 100% 하위호환.
+const DEFAULT_LANG = 'ko';
+const LANG_NAMES = {
+  ko: 'Korean',
+  ja: 'Japanese',
+  en: 'English',
+  'zh-CN': 'Simplified Chinese',
+  'zh-TW': 'Traditional Chinese',
+};
+function readProjectLangFile() {
+  try {
+    const j = JSON.parse(fs.readFileSync(PROJECT_LANG_FILE, 'utf8'));
+    return (j && typeof j === 'object') ? j : {};
+  } catch {
+    return {};
+  }
+}
+function writeProjectLangFile(obj) {
+  fs.writeFileSync(PROJECT_LANG_FILE, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  autoCommitFile('slack-bot/project-lang.json', 'chore(project-lang): giip project lang set/del 자동 반영');
+}
+function loadProjectLangMap() {
+  return (readProjectLangFile().map) || {};
+}
+function listProjectLang() {
+  return loadProjectLangMap();
+}
+function setProjectLang(name, lang) {
+  const key = String(name || '').trim().toLowerCase();
+  const code = String(lang || '').trim();
+  if (!key) throw new Error('프로젝트명이 필요합니다.');
+  if (!code) throw new Error('언어 코드가 필요합니다(예: ko, ja, en).');
+  const j = readProjectLangFile();
+  if (!j.map || typeof j.map !== 'object') j.map = {};
+  j.map[key] = code;
+  writeProjectLangFile(j);
+  return { name: key, lang: code };
+}
+function deleteProjectLang(name) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key) return false;
+  const j = readProjectLangFile();
+  if (j.map && Object.prototype.hasOwnProperty.call(j.map, key)) {
+    delete j.map[key];
+    writeProjectLangFile(j);
+    return true;
+  }
+  return false;
+}
+function resolveLangForProject(projectName) {
+  const key = String(projectName || '').trim().toLowerCase();
+  if (!key) return DEFAULT_LANG;
+  return loadProjectLangMap()[key] || DEFAULT_LANG;
+}
+function resolveLangNameForProject(projectName) {
+  const code = resolveLangForProject(projectName);
+  return LANG_NAMES[code] || code;
+}
+
 // プロジェクト名のマッピングを削除。存在して削除したら true、無ければ false。
 function deleteProjectCsn(name) {
   const key = String(name || '').trim().toLowerCase();
@@ -273,6 +335,11 @@ module.exports = {
   listProjectCsn,
   setProjectCsn,
   deleteProjectCsn,
+  listProjectLang,
+  setProjectLang,
+  deleteProjectLang,
+  resolveLangForProject,
+  resolveLangNameForProject,
   resolveChannelProject,
   projectWorkDir,
   applyChannelPin,

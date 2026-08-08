@@ -117,7 +117,7 @@ async function answerInChannel({ channelId, replyTs, text, workDir = BASE_DIR, t
 
   const projectName = path.basename(workDir);
   const agentDir = getAgentDir(workDir);
-  let prompt = `You are giipclaude, an AI assistant. Always respond in Korean.
+  let prompt = `You are giipclaude, an AI assistant. Always respond in ${config.resolveLangNameForProject(projectName)}.
 
 Working project: ${projectName}
 Working directory: ${workDir}
@@ -259,15 +259,15 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
       const fc = fs.readFileSync(taskFile, 'utf8');
       const statusM = fc.match(/^status:\s*(.+)$/m);
       const requestM = fc.match(/^request:\s*"?([^\n"]{1,120})/m);
-      const status = statusM ? statusM[1].trim() : '不明';
-      const request = requestM ? requestM[1].trim() : '（内容なし）';
+      const status = statusM ? statusM[1].trim() : '알수없음';
+      const request = requestM ? requestM[1].trim() : '(내용 없음)';
       const logMatch = fc.match(/## 進捗ログ([\s\S]*)/);
       const logLines = logMatch ? logMatch[1].trim().split('\n').filter(l => l.startsWith('|')).slice(-5).join('\n') : null;
-      let reply = `*タスク \`${targetId}\` — 状況報告*\n• ステータス: ${status}\n• 内容: ${request}`;
-      if (logLines) reply += `\n\n*進捗ログ（直近）:*\n${logLines}`;
+      let reply = `*태스크 \`${targetId}\` — 상태 보고*\n• 상태: ${status}\n• 내용: ${request}`;
+      if (logLines) reply += `\n\n*진행 로그(최근):*\n${logLines}`;
       await postMessage(channelId, reply, replyTs);
     } else {
-      await postMessage(channelId, `⚠️ タスク \`${targetId}\` が見つかりません。`, replyTs);
+      await postMessage(channelId, `⚠️ 태스크 \`${targetId}\`를 찾을 수 없습니다.`, replyTs);
     }
     return;
   }
@@ -282,7 +282,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
 
   const projectName = path.basename(workDir);
   const agentDirDM = getAgentDir(workDir);
-  let prompt = `You are giipclaude, an AI assistant. Always respond in Korean regardless of the language the user writes in.\n\nWorking project: ${projectName}\nWorking directory: ${workDir}\nAgent context directory: ${agentDirDM} (roles/, rules/, skills/, workflows/)\nRead relevant files from the agent context directory to apply the correct role and rules.\n\nIMPORTANT: Answer based on your knowledge of the project and K-Layer context. If you do not know the answer, say "모르겠습니다" clearly.\n\n되묻지 말고 실측: 설정·사양은 직접 조회하라. giip 서비스 설정(SMTP 등)의 정본=giipdb \`docs/30_Specs/\` + DB(예: SMTP=\`tEmailServerConfig\`, API \`EmailServerConfigGetActive\`). 사람만 아는 값만 질문한다.\n\nMANDATORY RULE — Task Number: If the user's message contains a 14-digit task number (e.g. 20260630170105), you MUST start your response with "[태스크 \`<task_number>\`]" on the very first line. Never omit the task number from your response.`;
+  let prompt = `You are giipclaude, an AI assistant. Always respond in ${config.resolveLangNameForProject(projectName)} regardless of the language the user writes in.\n\nWorking project: ${projectName}\nWorking directory: ${workDir}\nAgent context directory: ${agentDirDM} (roles/, rules/, skills/, workflows/)\nRead relevant files from the agent context directory to apply the correct role and rules.\n\nIMPORTANT: Answer based on your knowledge of the project and K-Layer context. If you do not know the answer, say "모르겠습니다" clearly.\n\n되묻지 말고 실측: 설정·사양은 직접 조회하라. giip 서비스 설정(SMTP 등)의 정본=giipdb \`docs/30_Specs/\` + DB(예: SMTP=\`tEmailServerConfig\`, API \`EmailServerConfigGetActive\`). 사람만 아는 값만 질문한다.\n\nMANDATORY RULE — Task Number: If the user's message contains a 14-digit task number (e.g. 20260630170105), you MUST start your response with "[태스크 \`<task_number>\`]" on the very first line. Never omit the task number from your response.`;
   if (claims.length) prompt += '\n\nK-Layer:\n' + claims.map(c=>`• ${c}`).join('\n');
   if (issues.length) prompt += '\n\nOpen Issues:\n' + issues.map(i=>`• #${i.number} ${i.title}`).join('\n');
   if (history.length) {
@@ -911,16 +911,16 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         if (subs.length === 1) match = subs[0];
         else if (subs.length > 1) {
           await postMessage(channelId,
-            `🔎 \`${query}\` に一致するワークフローが複数あります。1つに絞ってください:\n${subs.map(f => `• \`${nameOf(f)}\``).join('\n')}`,
+            `🔎 \`${query}\`에 일치하는 워크플로우가 여러 개 있습니다. 하나로 좁혀주세요:\n${subs.map(f => `• \`${nameOf(f)}\``).join('\n')}`,
             replyTs);
           return;
         }
       }
-      // ゆるい形で未一致 → ワークフロー指示ではない。通常ルーティングへフォールスルー。
+      // 느슨한 형태로 미일치 → 워크플로우 지시가 아님. 일반 라우팅으로 폴스루.
       if (!match && !looseForm) {
-        const list = candidates.length ? candidates.map(f => `• \`${nameOf(f)}\``).join('\n') : '(なし)';
+        const list = candidates.length ? candidates.map(f => `• \`${nameOf(f)}\``).join('\n') : '(없음)';
         await postMessage(channelId,
-          `❓ \`${projName}\` に \`${query}\` というワークフローが見つかりません。\n利用可能:\n${list}\n\n一覧: \`${projName} wflist\``,
+          `❓ \`${projName}\`에 \`${query}\`라는 워크플로우가 없습니다.\n사용 가능:\n${list}\n\n목록: \`${projName} wflist\``,
           replyTs);
         return;
       }
@@ -1037,7 +1037,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     const doApply = !!mergeCmd[1];
     const clusters = findDuplicatePendingClusters();
     if (clusters.length === 0) {
-      await postMessage(channelId, '🔍 統合対象の重複した未完了タスクはありません。', replyTs);
+      await postMessage(channelId, '🔍 통합 대상 중복 미완료 태스크가 없습니다.', replyTs);
       return;
     }
 
@@ -1136,7 +1136,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
             await postMessage(channelId, `⚠️ キャンセル失敗: ${err.message}`, replyTs);
           }
         } else {
-          await postMessage(channelId, `⚠️ Task \`${targetId}\` が見つかりません。\n\`tasklist\` で一覧を確認してください。`, replyTs);
+          await postMessage(channelId, `⚠️ Task \`${targetId}\`를 찾을 수 없습니다.\n\`tasklist\`로 목록을 확인하세요.`, replyTs);
         }
       }
     }
@@ -1200,7 +1200,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         } else if (fs.existsSync(cancelFile)) {
           await postMessage(channelId, `🚫 Task \`${targetId}\` はキャンセル済みです。`, replyTs);
         } else {
-          await postMessage(channelId, `⚠️ Task \`${targetId}\` が見つかりません。\n\`tasklist\` で一覧を確認してください。`, replyTs);
+          await postMessage(channelId, `⚠️ Task \`${targetId}\`를 찾을 수 없습니다.\n\`tasklist\`로 목록을 확인하세요.`, replyTs);
         }
       }
       return;
@@ -1240,16 +1240,16 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
       const fc = fs.readFileSync(taskFile, 'utf8');
       const statusM = fc.match(/^status:\s*(.+)$/m);
       const requestM = fc.match(/^request:\s*"?([^\n"]{1,120})/m);
-      const status = statusM ? statusM[1].trim() : '不明';
-      const request = requestM ? requestM[1].trim() : '（内容なし）';
+      const status = statusM ? statusM[1].trim() : '알수없음';
+      const request = requestM ? requestM[1].trim() : '(내용 없음)';
       const logMatch = fc.match(/## 進捗ログ([\s\S]*)/);
       const logLines = logMatch ? logMatch[1].trim().split('\n').filter(l => l.startsWith('|')).slice(-5).join('\n') : null;
-      let reply = `*タスク \`${targetId}\` — 状況報告*\n• ステータス: ${status}\n• 内容: ${request}`;
-      if (logLines) reply += `\n\n*進捗ログ（直近）:*\n${logLines}`;
-      reply += `\n\n実行: \`go ${targetId}\` | キャンセル: \`cancel ${targetId}\``;
+      let reply = `*태스크 \`${targetId}\` — 상태 보고*\n• 상태: ${status}\n• 내용: ${request}`;
+      if (logLines) reply += `\n\n*진행 로그(최근):*\n${logLines}`;
+      reply += `\n\n실행: \`go ${targetId}\` | 취소: \`cancel ${targetId}\``;
       await postMessage(channelId, reply, replyTs);
     } else {
-      await postMessage(channelId, `⚠️ タスク \`${targetId}\` が見つかりません。`, replyTs);
+      await postMessage(channelId, `⚠️ 태스크 \`${targetId}\`를 찾을 수 없습니다.`, replyTs);
     }
     return;
   }
@@ -1283,14 +1283,14 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         const fc = fs.readFileSync(activeFile, 'utf8');
         const statusM = fc.match(/^status:\s*(.+)$/m);
         const requestM = fc.match(/^request:\s*"?([^\n"]{1,100})/m);
-        const status = statusM ? statusM[1].trim() : '不明';
-        const request = requestM ? requestM[1].trim() : '（内容なし）';
+        const status = statusM ? statusM[1].trim() : '알수없음';
+        const request = requestM ? requestM[1].trim() : '(내용 없음)';
         await postMessage(channelId,
-          `📌 タスク \`${targetId}\` 参照:\n• ステータス: ${status}\n• 内容: ${request}\n📁 ファイル: \`${activeFile}\`\n\n実行: \`go ${targetId}\` | キャンセル: \`cancel ${targetId}\``,
+          `📌 태스크 \`${targetId}\` 참조:\n• 상태: ${status}\n• 내용: ${request}\n📁 파일: \`${activeFile}\`\n\n실행: \`go ${targetId}\` | 취소: \`cancel ${targetId}\``,
           replyTs
         );
       } else {
-        await postMessage(channelId, `⚠️ タスク \`${targetId}\` が見つかりません。`, replyTs);
+        await postMessage(channelId, `⚠️ 태스크 \`${targetId}\`를 찾을 수 없습니다.`, replyTs);
       }
       return;
     }
