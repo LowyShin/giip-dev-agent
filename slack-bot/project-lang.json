@@ -1,0 +1,4 @@
+{
+  "_comment": "프로젝트명(소문자) → AI 응답 언어 코드(ko/ja/en/zh-CN/zh-TW). 미등록 프로젝트는 config.js DEFAULT_LANG('ko')로 폴백 — 기존 전역 'Always respond in Korean' 동작과 100% 하위호환. Slack `giip project lang set <프로젝트> <lang>` 으로 관리(코드 변경 불필요, giip-974). lowyworkenv/slack-bot과 동일 패턴(별도 독립 코드베이스).",
+  "map": {}
+}
