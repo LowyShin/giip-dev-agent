@@ -11,11 +11,20 @@ const accounts = require('./claude-accounts');
 const minimax = require('./minimax-accounts');
 const { acquireRepoLock, releaseRepoLock } = require('./repo-lock');
 const config = require('./config'); // giip-974: 프로젝트별 응답 언어(resolveLangNameForProject)
+// giip-1063 비용 최적화 모듈
+const modelConfig = require('./model-config');
+const router = require('./model-router');
+const ctxBuilder = require('./context-builder');
+const prompts = require('./prompt-templates');
+const checkpoint = require('./retry-checkpoint');
+const costTracker = require('./cost-tracker');
 
 const BASE_DIR = path.join(__dirname, '..');
+// giip-1063: 비용 로그(.agent/runtime/cost-usage.jsonl)는 `!cost` 가 읽는 곳과 같아야 하므로
+// config.BASE_DIR(=WORKSPACE_DIR) 기준으로 통일한다.
+const COST_LOG_DIR = config.BASE_DIR || BASE_DIR;
 const TASKS_DIR = path.join(BASE_DIR, '.agent', 'tasks');
 const RESULTS_DIR = path.join(BASE_DIR, '.agent', 'results');
-const ROLES_DIR = path.join(BASE_DIR, '.agent', 'roles');
 const TASKLIST_FILE = path.join(__dirname, 'tasklist.json');
 
 function ensureDirs() {
@@ -30,27 +39,8 @@ function getTimestampId() {
   return `${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
 }
 
-// baseDir 配下の .agent/roles/ を読む。なければ Lowyworkenv の roles にフォールバック
-// filesRead に読んだファイルの絶対パスを push する
-function readRolesContext(baseDir = BASE_DIR, filesRead = []) {
-  const dirs = [
-    path.join(baseDir, '.agent', 'roles'),
-    ROLES_DIR,
-  ];
-  for (const dir of dirs) {
-    try {
-      const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
-      if (files.length === 0) continue;
-      return files.map(f => {
-        const fullPath = path.join(dir, f);
-        filesRead.push(fullPath);
-        const content = fs.readFileSync(fullPath, 'utf8');
-        return `### ${f}\n${content.slice(0, 800)}`;
-      }).join('\n\n---\n\n');
-    } catch {}
-  }
-  return '';
-}
+// giip-1063: `.agent/roles/*.md` 전량을 무선별로 프롬프트에 싣던 readRolesContext() 는 삭제했다.
+// 분석 단계에서 고른 컨텍스트만 context-builder 로 읽는다(선택 결과가 없으면 minimalDefaultContext).
 
 function getCurrentBranch(cwd = BASE_DIR) {
   const res = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8', windowsHide: true });
@@ -100,7 +90,28 @@ function clearStaleRebaseState(cwd = BASE_DIR) {
   return true;
 }
 
-function runClaude(args, cwd = BASE_DIR, input = null) {
+/** argv 에서 기존 `--model <v>` 지정을 제거한다(모델은 model-router 가 정한다). */
+function stripModelArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--model') { i++; continue; }
+    out.push(args[i]);
+  }
+  return out;
+}
+
+/**
+ * 동기 claude CLI 호출.
+ *
+ * giip-1063: 모델명을 여기서 하드코딩하지 않고 model-router 가 (작업 등급, 단계) 로 정한다.
+ * opts 로 등급/단계/계측 정보를 넘긴다(미지정 시 standard/plan — 기존 동작과 동일한 MiniMax 우선).
+ *
+ * @param {string[]} args    claude CLI 인자(--model 은 여기서 무시하고 라우터 결정을 쓴다)
+ * @param {string}   cwd
+ * @param {string}   input   stdin 으로 보낼 프롬프트
+ * @param {object}   [opts]  { taskClass, phase, taskId, contextChars, contextFiles, contextSelection, fastPath, costBaseDir }
+ */
+function runClaude(args, cwd = BASE_DIR, input = null, opts = {}) {
   const spawnOpts = {
     cwd,
     encoding: 'utf8',
@@ -111,18 +122,53 @@ function runClaude(args, cwd = BASE_DIR, input = null) {
     ...(input != null ? { input } : {}),
   };
 
+  const baseArgs = stripModelArgs(args);
+  const taskClass = opts.taskClass || 'standard';
+  const phase = opts.phase || 'plan';
+  const costBase = opts.costBaseDir || COST_LOG_DIR;
+  const logCost = (extra) => {
+    try {
+      costTracker.record(costBase, {
+        task_id: opts.taskId || null,
+        phase,
+        task_class: taskClass,
+        input_chars: (input || '').length,
+        context_chars: opts.contextChars || 0,
+        context_files: opts.contextFiles || 0,
+        context_selection: opts.contextSelection || null,
+        fast_path: opts.fastPath || false,
+        prompt_version: prompts.PROMPT_VERSION,
+        ...extra,
+      });
+    } catch { /* 계측 실패가 본 작업을 막지 않는다 */ }
+  };
+
   // 우선순위(사용자 지정): MiniMax 먼저 → 실패해야만 Claude 계정 풀로 폴백.
   // runTask/callClaude 와 같은 정책. 여기(분석·계획 생성)만 Claude 전용으로 남으면
   // MiniMax 1순위가 반쪽이 되고 Claude 한도를 계속 태운다.
   const mm = minimax.resolve();
-  if (mm) {
-    console.log(`[TaskManager] runClaude: MiniMax(${mm.model}) 로 실행`);
-    const r = spawnSync('claude', minimax.argsFor(args, mm), { ...spawnOpts, env: minimax.envFor(mm) });
-    if (!r.error && r.status === 0) return (r.stdout || '').trim();
+  const route = router.selectModel(taskClass, phase, { minimax: !!mm, claude: accounts.count() > 0 });
+
+  if (mm && route.provider === 'minimax') {
+    console.log(`[TaskManager] runClaude(${phase}/${taskClass}): MiniMax(${mm.model}) 로 실행`);
+    const t0 = Date.now();
+    const r = spawnSync('claude', minimax.argsFor(baseArgs, mm), { ...spawnOpts, env: minimax.envFor(mm) });
+    const out = (r?.stdout || '').trim();
+    const usage = costTracker.parseUsageFromOutput(`${r?.stdout || ''}\n${r?.stderr || ''}`);
+    logCost({
+      provider: 'minimax', model: mm.model, attempt: 1, duration_ms: Date.now() - t0,
+      status: (!r.error && r.status === 0) ? 'success' : 'failed',
+      output_chars: out.length, ...(usage || {}),
+    });
+    if (!r.error && r.status === 0) return out;
     const mmOut = `${r?.stdout || ''}\n${r?.stderr || ''}`;
     if (minimax.isUsageLimit(mmOut)) minimax.noteUsageLimit();
     console.log('[TaskManager] runClaude: MiniMax 실패 → Claude 폴백으로 전환');
   }
+
+  // Claude 로 갈 때 쓸 모델: 라우터가 정한 모델(=티어별), MiniMax 폴백이면 티어 폴백 모델.
+  const claudeModel = route.provider === 'claude' ? route.model : route.fallback.model;
+  const claudeArgs = [...baseArgs, '--model', claudeModel];
 
   // 계정 라우팅: weight 비율대로 계정 선택 → 한도면 다음 계정으로 재시도
   const maxTries = accounts.count();
@@ -130,9 +176,18 @@ function runClaude(args, cwd = BASE_DIR, input = null) {
   for (let i = 0; i < maxTries; i++) {
     const acct = accounts.pickAccount();
     if (!acct) throw new Error('claude 전 계정 사용량 한도 소진 — 잠시 후 재시도 필요');
-    result = spawnSync('claude', args, { ...spawnOpts, env: accounts.envFor(acct) });
+    const t0 = Date.now();
+    result = spawnSync('claude', claudeArgs, { ...spawnOpts, env: accounts.envFor(acct) });
+    const out = (result?.stdout || '').trim();
+    const usage = costTracker.parseUsageFromOutput(`${result?.stdout || ''}\n${result?.stderr || ''}`);
+    logCost({
+      provider: 'claude', model: claudeModel, attempt: i + 1, duration_ms: Date.now() - t0,
+      status: result && result.status === 0 ? 'success' : 'failed',
+      output_chars: out.length, fallback_from: mm ? 'minimax' : null,
+      ...(usage || {}),
+    });
     if (result.error) throw result.error;
-    if (result.status === 0) return (result.stdout || '').trim();
+    if (result.status === 0) return out;
     // 한도 메시지가 stdout에 찍히는 경우가 있어(giip-759) 두 스트림 모두 확인한다.
     const combinedOut = `${result.stdout || ''}\n${result.stderr || ''}`;
     if (accounts.isUsageLimit(combinedOut)) { accounts.noteUsageLimit(acct, combinedOut); continue; }
@@ -143,141 +198,176 @@ function runClaude(args, cwd = BASE_DIR, input = null) {
 
 // ── Rule 43: 컨텍스트 파일 provenance (경로 + 로드 사유) ──────────────────────
 // 전량 무선별 주입(readRolesContext) 대신, 요청 관련 role/rule/skill 만 사유와 함께 선별 로드한다.
+//
+// giip-1063: 실제 구현은 context-builder.js 로 옮겼다(파일 헤드만 읽는 카탈로그, 개수·길이 한도,
+// 중복 제거, 제목 기반 축약, mtime/hash 캐시). 여기에는 기존 호출부·export 를 위한 얇은 래퍼만 둔다.
 
-// .agent/roles·rules·skills 의 파일 카탈로그(경로 + 짧은 설명). skills 는 dir(SKILL.md) 또는 *.md.
+/** .agent/roles·rules·skills 카탈로그. 본문이 아니라 name/description/trigger 만 읽는다. */
 function buildContextCatalog(baseDir = BASE_DIR) {
-  const out = [];
-  const firstDesc = (text) => {
-    const fm = text.match(/description:\s*(.+)/i);
-    if (fm) return fm[1].trim().replace(/^["']|["']$/g, '').slice(0, 140);
-    const line = text.split(/\r?\n/).map(l => l.trim()).find(l => l && l !== '---');
-    return (line || '').replace(/^#+\s*/, '').slice(0, 140);
-  };
-  const addFile = (type, absPath) => {
-    try {
-      const rel = path.relative(baseDir, absPath).replace(/\\/g, '/');
-      out.push({ type, path: rel, desc: firstDesc(fs.readFileSync(absPath, 'utf8')) });
-    } catch {}
-  };
-  // roles/rules: project baseDir 우선, 없으면 Lowyworkenv(.agent) 로 폴백
-  for (const [type, sub] of [['role', 'roles'], ['rule', 'rules']]) {
-    let dir = path.join(baseDir, '.agent', sub);
-    try { if (!fs.readdirSync(dir).some(f => f.endsWith('.md'))) dir = path.join(BASE_DIR, '.agent', sub); }
-    catch { dir = path.join(BASE_DIR, '.agent', sub); }
-    try { fs.readdirSync(dir).filter(f => f.endsWith('.md')).forEach(f => addFile(type, path.join(dir, f))); } catch {}
-  }
-  // skills: dir 안 SKILL.md, 또는 top-level *.md
-  let skillsDir = path.join(baseDir, '.agent', 'skills');
-  if (!fs.existsSync(skillsDir)) skillsDir = path.join(BASE_DIR, '.agent', 'skills');
-  try {
-    for (const e of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-      if (e.isDirectory()) {
-        const sk = path.join(skillsDir, e.name, 'SKILL.md');
-        if (fs.existsSync(sk)) addFile('skill', sk);
-      } else if (e.name.endsWith('.md')) {
-        addFile('skill', path.join(skillsDir, e.name));
-      }
-    }
-  } catch {}
-  return out;
+  return ctxBuilder.buildContextCatalog(baseDir, BASE_DIR);
 }
 
-// 요청에 관련된 컨텍스트 파일을 LLM 으로 선별하고 각 파일의 로드 사유를 받는다. → [{path, reason}]
-function selectContextFiles(requestText, catalog, baseDir = BASE_DIR) {
-  if (!catalog.length) return [];
-  const catalogText = catalog.map((c, i) => `${i + 1}. [${c.type}] ${c.path} — ${c.desc}`).join('\n');
-  const prompt = `너는 아래 Slack 요청을 분석·수행하기 위해 참조해야 할 컨텍스트 파일(role/rule/skill)을 고르는 큐레이터다.
+/**
+ * 요청에 관련된 컨텍스트 파일을 저비용 모델로 선별한다 → [{path, reason, max_chars}].
+ * 분류/선별 단계는 model-router 가 항상 최저 티어를 강제하므로 Opus 가 쓰이지 않는다.
+ * 모델 호출이 실패하거나 결과가 비면 정적 선별로 폴백한다(호출 1회로 끝).
+ */
+function selectContextFiles(requestText, catalog, baseDir = BASE_DIR, opts = {}) {
+  if (!catalog || !catalog.length) return [];
+  const limits = modelConfig.contextLimits();
+  const staticPick = () => ctxBuilder.selectContextFilesStatic(requestText, catalog, limits);
 
-요청:
-"${requestText}"
+  if (opts.staticOnly) return staticPick();
 
-사용 가능한 컨텍스트 파일:
-${catalogText}
+  // 카탈로그가 크면 선별 호출 프롬프트 자체가 비싸진다 → 정적 점수로 상위 후보만 넘긴다.
+  const narrowed = ctxBuilder.narrowCatalog(requestText, catalog,
+    Number(process.env.CONTEXT_CATALOG_MAX) || 30);
+  const prompt = prompts.buildContextSelectionPrompt({
+    catalogText: ctxBuilder.formatCatalogForPrompt(narrowed),
+    requestText,
+  });
 
-이 요청 처리에 "실제로 관련 있는" 파일만 골라라(무관한 것은 넣지 말 것, 보통 2~8개). 각 파일에 대해
-"이 태스크에서 그 파일의 무엇을 참조/적용하려는지"를 한국어 한 줄 사유로 적어라.
-아래 JSON 배열만 출력한다(코드펜스·설명 금지):
-[{"path":"<위 목록의 정확한 경로>","reason":"<한 줄 사유>"}]`;
-  const raw = runClaude(['-p', '--model', 'claude-opus-4-8'], baseDir, prompt);
+  let raw = '';
+  try {
+    raw = runClaude(['-p'], baseDir, prompt, {
+      taskClass: opts.taskClass || 'standard',
+      phase: 'context',
+      taskId: opts.taskId || null,
+      costBaseDir: opts.costBaseDir || COST_LOG_DIR,
+    });
+  } catch (e) {
+    console.error('[TaskManager] 컨텍스트 선별 호출 실패 → 정적 선별로 폴백:', e.message);
+    return staticPick();
+  }
+
   let parsed = [];
   try { const m = raw.match(/\[[\s\S]*\]/); parsed = m ? JSON.parse(m[0]) : []; } catch { parsed = []; }
   const valid = new Set(catalog.map(c => c.path));   // 카탈로그에 없는(할루시네이션) 경로 차단
   const seen = new Set();
-  return parsed
+  const picked = parsed
     .filter(x => x && typeof x.path === 'string' && valid.has(x.path) && !seen.has(x.path) && seen.add(x.path))
-    .map(x => ({ path: x.path, reason: (String(x.reason || '').trim().slice(0, 200)) || '(사유 미기재)' }));
+    .slice(0, limits.hardMaxFiles)
+    .map(x => ({
+      path: x.path,
+      reason: (String(x.reason || '').trim().slice(0, 200)) || '(사유 미기재)',
+      max_chars: Math.min(Number(x.max_chars) || limits.perFileMaxChars, limits.perFileMaxChars),
+    }));
+
+  return picked.length ? picked : staticPick();
 }
 
-// 선별된 파일 내용을 읽어 분석 프롬프트용 컨텍스트 문자열과 filesRead([{path,reason}]) 를 만든다.
-function readSelectedContext(selected, baseDir = BASE_DIR) {
-  const parts = [], filesRead = [];
-  for (const s of selected) {
-    try {
-      const content = fs.readFileSync(path.join(baseDir, s.path), 'utf8');
-      parts.push(`### ${s.path} (로드 사유: ${s.reason})\n${content.slice(0, 800)}`);
-      filesRead.push({ path: s.path, reason: s.reason });
-    } catch {}
-  }
-  return { context: parts.join('\n\n---\n\n'), filesRead };
-}
-
-// filesRead 항목을 {path, reason} 로 정규화(문자열/절대경로 입력 후방호환 — 예: wfrun 의 [wfPath]).
-function normalizeFilesRead(filesRead) {
-  return (filesRead || []).map(f => {
-    if (typeof f === 'string') {
-      const rel = path.isAbsolute(f) ? path.relative(BASE_DIR, f).replace(/\\/g, '/') : f.replace(/\\/g, '/');
-      return { path: rel, reason: '(직접 지정)' };
-    }
-    return { path: String(f.path || '').replace(/\\/g, '/'), reason: f.reason || '(사유 미기재)' };
+/** 선별된 파일 내용을 한도 안에서 읽어 컨텍스트 문자열과 filesRead 를 만든다. */
+function readSelectedContext(selected, baseDir = BASE_DIR, opts = {}) {
+  return ctxBuilder.readSelectedContext(selected, baseDir, {
+    workspaceDir: BASE_DIR,
+    queryText: opts.queryText || '',
+    limits: opts.limits,
   });
 }
 
+/** filesRead 항목을 {path, reason, max_chars} 로 정규화(문자열/절대경로 입력 후방호환). */
+function normalizeFilesRead(filesRead) {
+  return ctxBuilder.normalize(filesRead, BASE_DIR);
+}
+
 // ── Phase 1: 요청 분석 → TASK 파일 생성 ─────────────────────────────────────
-// returns { planContent, filesRead: [{path, reason}] }
+// returns { planContent, filesRead: [{path, reason, max_chars}], classification, contextStats, fastPath }
+//
+// giip-1063
+//  - 컨텍스트 카탈로그는 본문이 아니라 name/description/trigger 만 읽는다.
+//  - 선별/계획 모델은 model-router 가 작업 등급으로 정한다(Opus 하드코딩 제거).
+//  - trivial + 대상 경로가 명시된 요청은 Fast Path — 선별·계획 모델 호출을 0회로 줄이고
+//    실행 1회로 끝낸다.
+
+/** Fast Path 용 정적 계획. 모델 호출 없이 태스크 사양 형식을 맞춰 만든다. */
+function buildFastPathPlan(requestText, cls) {
+  const title = String(requestText || '').replace(/\s+/g, ' ').trim().slice(0, 60) || '단순 수정';
+  const targets = cls.explicitPaths.length ? cls.explicitPaths : ['(요청 본문에 명시된 대상)'];
+  return [
+    `# TASK: ${title}`,
+    '',
+    '## 요청 내용',
+    String(requestText || '').trim(),
+    '',
+    '## 실행 계획',
+    `1. 대상 파일을 먼저 읽어 현재 내용을 확인한다 (${targets.join(', ')})`,
+    '2. 요청된 범위 안에서만 수정한다 (범위 밖 리팩터링·포맷 정리 금지)',
+    '3. diff 를 확인하고 테스트 또는 재현 검증을 수행한다',
+    '4. 결과 보고서를 작성한다',
+    '',
+    '## 영향 파일/서브시스템',
+    ...targets.map(t => `- ${t}`),
+    '',
+    '## 주의사항',
+    `- Fast Path: trivial(신뢰도 ${cls.confidence}) 로 정적 분류돼 계획 생성 모델 호출을 생략했습니다.`,
+    '- 작업이 3개 초과 파일 / 인증·보안·DB·배포 변경 / 삭제·대량 변경으로 확대되면 즉시 중단하고',
+    '  "Fast Path 부적합 — 일반 경로로 승격 필요"를 보고서에 남길 것.',
+  ].join('\n');
+}
+
 function analyzeRequest(requestText, taskId, baseDir = BASE_DIR) {
   ensureDirs();
 
   const claims = searchKLayer(requestText);
   const projectName = path.basename(baseDir);
-  // Rule 43: 요청 관련 role/rule/skill 만 사유와 함께 선별 로드하고, 그 사유를 태스크 파일에 남긴다.
+  const limits = modelConfig.contextLimits();
+
+  // 1) 카탈로그(본문 미로딩) + 사전 정적 분류(모델 호출 0회)
   const catalog = buildContextCatalog(baseDir);
-  const selected = selectContextFiles(requestText, catalog, baseDir);
-  const { context: rolesContext, filesRead } = readSelectedContext(selected, baseDir);
+  const pre = router.classifyTask(requestText, [], '');
+  const fastPath = pre.fastPathEligible;
 
-  const analysisPrompt = `You are a senior software architect. Always respond in ${config.resolveLangNameForProject(projectName)}.
+  // 2) 컨텍스트 선별 — Fast Path 면 LLM 호출 없이 정적 선별
+  let selected = selectContextFiles(requestText, catalog, baseDir, {
+    staticOnly: fastPath,
+    taskClass: pre.class,
+    taskId,
+    costBaseDir: COST_LOG_DIR,
+  });
+  if (!selected.length) selected = ctxBuilder.minimalDefaultContext(baseDir, BASE_DIR);
 
-Working project: ${projectName}
-Working directory: ${baseDir}
+  // 3) 선택 파일만, 한도 안에서, 제목 기반 축약으로 읽는다
+  const { context: rolesContext, filesRead, stats } =
+    readSelectedContext(selected, baseDir, { queryText: requestText, limits });
 
-A team member sent this request via Slack:
-"${requestText}"
-${rolesContext ? `\n=== 프로젝트 역할/컨텍스트 ===\n${rolesContext}\n` : ''}${claims.length > 0 ? `\n=== K-Layer 관련 지식 ===\n${claims.map(c => `• ${c}`).join('\n')}\n` : ''}
-Analyze the request and output a task specification in this EXACT format (in Korean):
+  // 4) Fast Path: 별도 계획 생성 호출을 하지 않는다(3.4)
+  if (fastPath) {
+    console.log(`[TaskManager] analyzeRequest: Fast Path(trivial) — 계획 모델 호출 생략 (files=${stats.files}, chars=${stats.chars})`);
+    return {
+      planContent: buildFastPathPlan(requestText, pre),
+      filesRead,
+      classification: pre,
+      contextStats: stats,
+      fastPath: true,
+    };
+  }
 
-# TASK: [짧은 제목]
+  // 5) 계획 생성 — 모델은 등급별(planner/complex/critical) 라우팅
+  const analysisPrompt = prompts.buildAnalysisPrompt({
+    requestText,
+    contextText: rolesContext,
+    projectName,
+    baseDir,
+    langName: config.resolveLangNameForProject(projectName),
+    kLayerClaims: claims,
+  });
 
-## 요청 내용
-[요청 요약 — 1~2줄]
+  const planContent = runClaude(['-p'], baseDir, analysisPrompt, {
+    taskClass: pre.class,
+    phase: 'plan',
+    taskId,
+    contextChars: stats.chars,
+    contextFiles: stats.files,
+    contextSelection: filesRead.map(f => ({ path: f.path, reason: f.reason })),
+    costBaseDir: COST_LOG_DIR,
+  });
 
-## 실행 계획
-1. [구체적인 실행 단계]
-2. [단계 2]
-3. [단계 3]
-(최대 7단계)
-
-## 영향 파일/서브시스템
-- [변경될 파일 또는 서브시스템]
-
-## 주의사항
-- [배포 주의사항, 부작용 등]
-
-Output ONLY the task specification, no extra commentary.`;
-
-  const planContent = runClaude(['-p', '--model', 'claude-opus-4-8'], baseDir, analysisPrompt);
-  return { planContent, filesRead };
+  // 6) 계획을 반영해 재분류(정적). 실행 단계 모델 티어는 이 결과를 쓴다.
+  const classification = router.classifyTask(requestText, filesRead, planContent);
+  return { planContent, filesRead, classification, contextStats: stats, fastPath: false };
 }
 
-function createTaskFile(taskId, requestText, planContent, filesRead = []) {
+function createTaskFile(taskId, requestText, planContent, filesRead = [], meta = {}) {
   ensureDirs();
 
   const norm = normalizeFilesRead(filesRead);   // Rule 43: 경로 + 로드 사유
@@ -285,11 +375,17 @@ function createTaskFile(taskId, requestText, planContent, filesRead = []) {
     ? '\n' + norm.map(f => `#   - ${f.path} — ${f.reason}`).join('\n')
     : '\n#   (없음)';
 
+  // giip-1063: 실행 단계가 "분석 때 고른 파일만" 다시 읽을 수 있도록 파싱 가능한 형태로 저장한다.
+  // 아래 주석 형태(#   - path — reason)는 기존 태스크 파일과의 하위 호환을 위해 그대로 남긴다.
   const header = `---
 task_id: ${taskId}
 status: pending
 requested_at: ${new Date().toISOString()}
 request: "${requestText.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
+task_class: ${meta.taskClass || 'standard'}
+fast_path: ${meta.fastPath ? 'true' : 'false'}
+prompt_version: ${prompts.PROMPT_VERSION}
+${ctxBuilder.formatContextFilesYaml(norm)}
 # 분석에 로드된 컨텍스트 파일 (role/rule/skill — 경로 — 로드 사유):${fileList}
 ---
 
@@ -302,7 +398,30 @@ request: "${requestText.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 // 既存タスクファイルを「更新」する（新規IDを発給しない）。
 // 参照されたタスク番号に改訂を追記し、done/cancel にあれば tasks/ に戻して pending に再オープンする。
 // 見つからなければ createTaskFile にフォールバック。返り値は tasks/{taskId}.md の絶対パス。
-function updateTaskFile(taskId, requestText, planContent, filesRead = []) {
+/**
+ * giip-1063: 태스크 파일 frontmatter 의 context_files / task_class 를 최신 선택으로 갱신한다.
+ * 실행 단계가 "이번 분석에서 고른 파일"만 다시 읽게 하기 위한 것. frontmatter 가 없으면 그대로 둔다.
+ */
+function upsertContextFilesFrontmatter(content, norm, meta = {}) {
+  const yaml = ctxBuilder.formatContextFilesYaml(norm);
+  let out = content;
+
+  // task_class 갱신(없으면 나중에 블록과 함께 삽입)
+  if (/^task_class:\s*.+$/m.test(out)) {
+    out = out.replace(/^task_class:\s*.+$/m, `task_class: ${meta.taskClass || 'standard'}`);
+  }
+
+  const blockRe = /^context_files:\s*(?:\[\]|\r?\n(?:[ \t]+.*\r?\n?)*)/m;
+  if (blockRe.test(out)) return out.replace(blockRe, `${yaml}\n`);
+
+  const fmEnd = out.match(/^---\r?\n[\s\S]*?(\r?\n---\r?\n)/);
+  if (!fmEnd) return out;   // frontmatter 없는 구형 파일 — 건드리지 않는다
+  const insertAt = out.indexOf(fmEnd[1]);
+  const extra = /^task_class:\s*/m.test(out) ? '' : `\ntask_class: ${meta.taskClass || 'standard'}`;
+  return `${out.slice(0, insertAt)}${extra}\n${yaml}${out.slice(insertAt)}`;
+}
+
+function updateTaskFile(taskId, requestText, planContent, filesRead = [], meta = {}) {
   ensureDirs();
   const activePath = path.join(TASKS_DIR, `${taskId}.md`);
   const existing = [
@@ -312,7 +431,7 @@ function updateTaskFile(taskId, requestText, planContent, filesRead = []) {
   ].find(f => fs.existsSync(f));
 
   // 元ファイルが見つからない場合のみ新規作成（実質 createTaskFile と同じ挙動）
-  if (!existing) return createTaskFile(taskId, requestText, planContent, filesRead);
+  if (!existing) return createTaskFile(taskId, requestText, planContent, filesRead, meta);
 
   let content = fs.readFileSync(existing, 'utf8');
 
@@ -320,6 +439,9 @@ function updateTaskFile(taskId, requestText, planContent, filesRead = []) {
   content = /status:\s*.+/i.test(content)
     ? content.replace(/status:\s*.+/i, 'status: pending')
     : `status: pending\n${content}`;
+
+  // 실행 단계가 최신 선택 컨텍스트만 읽도록 frontmatter 갱신
+  content = upsertContextFilesFrontmatter(content, normalizeFilesRead(filesRead), meta);
 
   // 改訂を追記（元タスクの内容・成果物は保持したまま）
   const now = new Date().toISOString();
@@ -365,6 +487,13 @@ function extractTitle(planContent) {
 }
 
 // ── Phase 2: subagent 실행 (비동기) ─────────────────────────────────────────
+//
+// giip-1063
+//  - 실행 프롬프트에 `.agent/roles` 전량을 다시 넣던 readRolesContext() 호출을 제거했다.
+//    분석 단계가 태스크 파일 frontmatter 에 남긴 context_files 만 다시 읽는다.
+//  - 프롬프트는 prompt-templates 가 고정 prefix 순서로 조립한다(캐시 적중률).
+//  - 모델은 model-router 가 작업 등급으로 정한다(Opus 고정 호출 제거).
+//  - 실패 시 checkpoint 를 남기고, 다음 모델에는 전체 원문 대신 재개 지시문을 덧붙인다.
 function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null }, baseDir = BASE_DIR, ctx = null) {
   ensureDirs();
 
@@ -382,82 +511,69 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
 
   const taskContent = fs.readFileSync(taskFilePath, 'utf8');
   const resultFile = path.join(RESULTS_DIR, `${taskId}.md`);
-  const rolesContext = readRolesContext(baseDir);
+
+  // ── 선택된 컨텍스트만 재로딩 (전체 roles 로딩 제거, 3.1) ──────────────────
+  // 신규 태스크: frontmatter 의 context_files, 구형 태스크: 주석 목록(하위 호환).
+  // 둘 다 없거나 읽기에 실패하면 "최소" 기본 컨텍스트만 쓴다 — 전체 roles 로 되돌아가지 않는다.
+  let selected = ctxBuilder.parseContextFiles(taskContent);
+  let contextSource = selected.length ? 'task-metadata' : 'minimal-default';
+  if (!selected.length) selected = ctxBuilder.minimalDefaultContext(baseDir, BASE_DIR);
+  const ctxRead = ctxBuilder.readSelectedContext(selected, baseDir, {
+    workspaceDir: BASE_DIR,
+    queryText: taskContent,
+    limits: modelConfig.contextLimits(),
+  });
+  if (!ctxRead.filesRead.length && contextSource === 'task-metadata') {
+    // 선택 목록이 손상돼 하나도 못 읽은 경우에만 최소 기본으로 대체
+    const fb = ctxBuilder.readSelectedContext(
+      ctxBuilder.minimalDefaultContext(baseDir, BASE_DIR), baseDir,
+      { workspaceDir: BASE_DIR, queryText: taskContent });
+    ctxRead.context = fb.context;
+    ctxRead.filesRead = fb.filesRead;
+    ctxRead.stats = fb.stats;
+    contextSource = 'minimal-default(선택 목록 손상)';
+  }
+  console.log(`[TaskManager] task ${taskId}: 실행 컨텍스트 ${ctxRead.filesRead.length}개 파일 / ${ctxRead.stats.chars}자 (${contextSource})`);
+
   const claims = searchKLayer(taskContent);
 
   // ctx が渡されていれば prepareTaskBranch 済みの専用ブランチ。無ければ現在ブランチ(後方互換)。
   const currentBranch = (ctx && ctx.branch) || getCurrentBranch(baseDir);
   const baseBranch = (ctx && ctx.base) || getBaseBranch(baseDir);
 
-  // 進捗コメント・プロトコル(PROTOCOL_PROGRESS_COMMENT.md): giip issue に連携済み(isn あり)の時だけ
-  // 注入する。isn が無ければ giip 未連携なのでブロック全体を省く(条件「giip issue api 접근 가능한 환경이면」)。
+  // 작업 등급: 분석 단계가 남긴 frontmatter 우선, 없으면(구형 태스크) 본문으로 정적 분류.
+  const fmClassMatch = taskContent.match(/^task_class:\s*(\w+)\s*$/m);
+  const fmClass = fmClassMatch && router.ORDER.includes(fmClassMatch[1]) ? fmClassMatch[1] : null;
+  const classification = fmClass
+    ? { class: fmClass, confidence: 1, reasons: ['분석 단계에서 결정된 등급 재사용'] }
+    : router.classifyTask(taskContent, ctxRead.filesRead, taskContent);
+  const taskClass = classification.class;
+  const fastPath = /^fast_path:\s*true\s*$/m.test(taskContent);
+  console.log(`[TaskManager] task ${taskId}: class=${taskClass}${fastPath ? ' (fast path)' : ''} — ${classification.reasons.join(' / ')}`);
+
+  // 進捗コメント・プロトコル(PROTOCOL_PROGRESS_COMMENT.md) は프롬프트 고정부에 있고,
+  // 여기서는 issue 번호와 커맨드만 동적 상태로 넘긴다(고정 prefix 안정화).
   const addCommentScript = path.join(BASE_DIR, '..', 'giipprj', 'giipdb', 'mgmt', 'addIssueComment.ps1');
-  const progressBlock = isn ? `
 
-=== 진행 코멘트 프로토콜 (정본 .agent/rules/PROTOCOL_PROGRESS_COMMENT.md) ===
-이 태스크는 giip issue #${isn} 에 연동돼 있다. 진행 상황을 자주 코멘트로 남겨, 코멘트만 봐도 어디까지
-왔고 무엇이 바뀌었는지 재구성되게 하라. 파일 1개당 코멘트 1개를 강제하지 말고 "논리 묶음" 단위로
-각 1~3줄 짧게 남긴다(같은 내용 연타·스팸 금지). 남기는 시점:
-  1) 착수: 로드해서 따르는 role/rule/skill/workflow 를 명시.
-  2) 참조 정본 변경: 따라야 할 role/rule/skill/workflow 파일 자체를 수정할 때 — 무엇을 왜.
-  3) 대상 파일 변경: 실제 수정/생성/삭제한 소스·문서가 생길 때마다(논리 묶음마다) — 경로 + 한 줄.
-  4) 검색 발생: 부득이 grep/find 했으면 (a)왜 (b)어디에 링크로 흡수했는지(Search→Link→Report).
-  5) 분기·막힘·판단: 에러·사람 확인 필요, 중요한 설계 판단이 생길 때.
-  6) **완료 직전(필수, 2026-07-29)**: 작업을 마치기 직전, 봇이 최종 "완료" 코멘트를 달기 *전에* 아래 두
-     코멘트를 네가 먼저 남겨라 — (a) **테스트 결과**: 실제로 무엇을 어떻게 실행/재현해서 검증했는지와
-     결과(성공/실패/부분성공). 기존 테스트가 있으면 커맨드·종료코드·출력 요약, 없으면 수행한 수동
-     재현·재검증 절차와 결과("테스트 없음"이라고만 쓰고 넘기지 말 것 — 최소 1건의 재현 검증 필수).
-     (b) **사용자 테스트 방법**: 사람이 직접 확인하려면 무엇을 클릭/실행/조회하면 되는지 재현 가능한
-     구체 절차(URL·커맨드·화면 경로 등). 막연하게 "확인해보세요"라고 쓰지 말 것.
-빈도: 몇 분 이상 걸리는 작업이면 최소 시작·중간·끝이 코멘트로 남게 한다.
-명령(직접-DB append, 한글 안 깨짐):
-  pwsh -File "${addCommentScript}" -isn ${isn} -content "<본문>" -issuetype note -author "slack-bot"
-  (중간 진행은 issuetype=note. 상태 전이/최종 코멘트는 봇이 별도 처리하므로 여기서 상태는 바꾸지 말 것.)
-` : '';
-  const executionPrompt = `You are a senior software engineer working in the Lowyworkenv workspace. Always respond in ${config.resolveLangNameForProject(path.basename(baseDir))}.
-Working directory: ${baseDir}
-Current branch: ${currentBranch} (task 전용 브랜치, base=${baseBranch} 최신 기준)
-
-=== 담당 태스크 ===
-${taskContent}
-
-=== 사용 가능한 역할 ===
-${rolesContext || '(roles not found)'}
-
-=== K-LAYER 지식 ===
-${claims.length > 0 ? claims.map(c => `• ${c}`).join('\n') : '(없음)'}
-
-=== 작업 지시 ===
-0. **되묻지 말고 실측하라**: 경로·설정·사양 등 조회로 확정 가능한 값은 사용자에게 다시 묻지 말고 직접 찾아 결정한다.
-   - giip 서비스 설정(SMTP·메일·인증 등)의 정본은 **giipdb 사양서(\`giipprj/giipdb/docs/30_Specs/\`)와 DB**다. 사람에게 묻기 전에 반드시 그곳부터 grep/조회하라. 예: SMTP 설정은 \`tEmailServerConfig\` 테이블에 있고 giip API \`EmailServerConfigGetActive\`(SP \`pApiEmailServerConfigGetActivebyAK\`, 서버측 \`bySk\`)로 조회한다.
-   - 정말로 사람만 아는 값(외부 자격증명 실물, 사용자의 의도적 선택)만 질문한다.
-1. 위 태스크의 실행 계획을 순서대로 실행하세요.
-2. Read/Edit/Write/Bash 도구를 사용해 이 저장소(${baseDir}) 안에서 실제 코드 변경을 수행하세요.
-3. **git 커밋·push·PR·브랜치 전환은 절대 하지 마세요.** 작업트리는 이미 태스크 전용 브랜치 \`${currentBranch}\`(base=${baseBranch} 최신 fetch 기준)로 준비돼 있습니다. 파일 변경만 마치면, 봇이 작업 종료 후 자동으로 이 브랜치에 커밋·push 하고 \`${baseBranch}\` 로 PR 을 생성합니다. (당신이 직접 git 을 만지면 브랜치/PR 흐름이 깨집니다.)
-4. 모든 단계 완료 후 반드시 다음 경로에 결과 보고서를 작성하세요:
-   ${resultFile}
-
-결과 보고서 형식:
----
-# 작업 완료 보고서: [태스크 제목]
-
-## 완료 일시
-${new Date().toISOString()}
-
-## 실시 내용
-(실제 수행한 작업의 상세 설명)
-
-## 변경 파일
-- path/to/file — 변경 내용 요약
-
-## 결과/상태
-(성공 / 부분 완료 / 실패, 이유)
-
-## 다음 단계
-(후속 작업이 필요한 경우 명기)
----
-${progressBlock}
-지금 바로 작업을 시작하세요.`;
+  const buildPrompt = (attemptNo, resumeInstruction) => prompts.buildExecutionPrompt({
+    fastPath,
+    contextText: ctxRead.context,
+    contextFiles: ctxRead.filesRead.map(f => ({ path: f.path, reason: f.reason })),
+    projectName: path.basename(baseDir),
+    baseDir,
+    baseBranch,
+    langName: config.resolveLangNameForProject(path.basename(baseDir)),
+    taskContent,
+    kLayerClaims: claims,
+    taskId,
+    taskClass,
+    branch: currentBranch,
+    attempt: attemptNo,
+    resultFile,
+    isn,
+    addCommentScript: isn ? addCommentScript : null,
+    resumeInstruction,
+  });
 
   // 実行サブエージェントが roles/rules/skills/workflows を参照できるよう .agent を許可
   // （baseDir に .agent が無ければ BASE_DIR/.agent にフォールバック — index.js の getAgentDir と同じ規則）
@@ -468,20 +584,26 @@ ${progressBlock}
   const args = ['-p', '--dangerously-skip-permissions', '--add-dir', agentDir];
 
   // 계정 라우팅: weight 비율대로 계정 선택. 실행 중 사용량 한도에 걸리면
-  // 해당 계정을 쿨다운하고 다음 계정으로 태스크를 처음부터 재실행한다.
-  // (주의: 재실행이므로 이미 push된 커밋이 있으면 중복 커밋 가능 — fail보다 나은 동작)
+  // 해당 계정을 쿨다운하고 다음 계정으로 재실행한다.
+  // giip-1063: 재실행 시 checkpoint 로 "이미 끝난 일"을 알려 처음부터 반복하지 않게 한다.
   const tried = new Set();
   // 우선순위(사용자 지정): MiniMax 먼저, MiniMax 한도 소진 시에만 Claude로 폴백.
-  // mmExhausted=true 가 되면(이번 태스크 한정) 이후 attempt() 는 MiniMax를 다시 시도하지 않는다
-  // (minimax.resolve() 는 별도로 자체 쿨다운을 갖고 있어 다음 태스크에서는 그 쿨다운을 그대로 따른다).
   let mmExhausted = false;
+  let attemptNo = 0;
+  const retryState = { totalAttempts: 0, providerAttempts: {} };
 
-  function attempt() {
-    let acct = mmExhausted ? null : minimax.resolve();
-    let env;
-    if (acct) {
+  function attempt(resumeInstruction = null, fallbackFrom = null) {
+    const mmAvailable = mmExhausted ? null : minimax.resolve();
+    const route = router.selectModel(taskClass, 'execute',
+      { minimax: !!mmAvailable, claude: accounts.count() > 0 });
+
+    let acct, env, provider, modelName;
+    if (mmAvailable && route.provider === 'minimax') {
+      acct = mmAvailable;
       env = minimax.envFor(acct);
-      console.log(`[TaskManager] task ${taskId}: MiniMax(${acct.model}) 로 실행`);
+      provider = 'minimax';
+      modelName = acct.model;
+      console.log(`[TaskManager] task ${taskId}: MiniMax(${modelName}) 로 실행 (class=${taskClass})`);
     } else {
       acct = accounts.pickAccount();
       if (!acct) {
@@ -489,13 +611,38 @@ ${progressBlock}
         return null;
       }
       env = accounts.envFor(acct);
-      if (mmExhausted) console.log(`[TaskManager] task ${taskId}: MiniMax 한도 소진 → Claude(${acct.name}) 폴백`);
+      provider = 'claude';
+      // 라우터가 정한 모델. 반복 실패 시에만(complex/critical) 최상위 모델로 승격한다.
+      const esc = router.escalateOnFailure(taskClass, retryState.totalAttempts);
+      modelName = esc ? esc.model : (route.provider === 'claude' ? route.model : route.fallback.model);
+      if (esc) console.log(`[TaskManager] task ${taskId}: ${esc.reason}`);
+      if (mmExhausted) console.log(`[TaskManager] task ${taskId}: MiniMax 한도 소진 → Claude(${acct.name}, ${modelName}) 폴백`);
     }
+
+    // 무한 재시도 금지(3.5): 공급자별/전체 상한 확인
+    const gate = checkpoint.canRetry(retryState, provider);
+    if (!gate.ok) {
+      const err = new Error(`재시도 상한 도달 — ${gate.reason}`);
+      console.error(`[TaskManager] task ${taskId}: ${err.message}`);
+      onError(err, fs.existsSync(resultFile) ? resultFile : null);
+      return null;
+    }
+    checkpoint.noteAttempt(retryState, provider);
+    attemptNo += 1;
+
     // tried 는 Claude 계정 로테이션 가드(tried.size < accounts.count())에만 쓰인다.
-    // MiniMax 는 별도 mmExhausted 플래그로 추적하므로 여기 섞으면 카운트가 어긋난다(오프바이원 방지).
-    if (acct.provider !== 'minimax') tried.add(acct.name);
-    // MiniMax 폴백은 claude CLI 기본 모델 선택을 안 타므로 --model 로 명시 지정한다.
-    const spawnArgs = acct.provider === 'minimax' ? [...args, '--model', acct.model] : args;
+    if (provider !== 'minimax') tried.add(acct.name);
+
+    const spawnArgs = provider === 'minimax'
+      ? [...args, '--model', modelName]
+      : [...args, '--model', modelName];
+
+    const executionPrompt = buildPrompt(attemptNo, resumeInstruction);
+    checkpoint.beginAttempt(baseDir, taskId, {
+      attempt: attemptNo, provider, model: modelName, taskClass,
+    });
+
+    const startedAt = Date.now();
     const proc = spawn('claude', spawnArgs, {
       cwd: baseDir,
       stdio: ['pipe', 'pipe', 'pipe'], // stdin 으로 프롬프트 전달(ENAMETOOLONG 회피)
@@ -511,26 +658,58 @@ ${progressBlock}
 
     proc.on('close', (code) => {
       const combinedOut = `${stdout}\n${stderr}`;
+      const usage = costTracker.parseUsageFromOutput(combinedOut);
+      try {
+        costTracker.record(COST_LOG_DIR, {
+          task_id: taskId,
+          phase: 'execute',
+          task_class: taskClass,
+          provider,
+          model: modelName,
+          attempt: attemptNo,
+          input_chars: executionPrompt.length,
+          output_chars: stdout.length,
+          context_chars: ctxRead.stats.chars,
+          context_files: ctxRead.filesRead.length,
+          skills_loaded: ctxRead.filesRead.filter(f => /\/skills\//.test(f.path)).length,
+          cache_hit: ctxRead.stats.cache_hits > 0 ? true : null,
+          duration_ms: Date.now() - startedAt,
+          status: code === 0 ? 'success' : 'failed',
+          fallback_from: fallbackFrom,
+          fast_path: fastPath,
+          prompt_version: prompts.PROMPT_VERSION,
+          context_selection: ctxRead.filesRead.map(f => ({ path: f.path, reason: f.reason })),
+          // checkpoint 로 이어서 재개한 시도인지 기록(재시도가 처음부터 다시 한 것인지 구분).
+          resumed: !!resumeInstruction,
+          ...(usage || {}),
+        });
+      } catch { /* 계측 실패가 태스크를 막지 않는다 */ }
 
-      // MiniMax(1순위) 실패 → 이번 태스크는 더 이상 MiniMax를 시도하지 않고 Claude 풀로 전환.
-      // 한도성 실패면 minimax 자체 쿨다운도 걸어(다음 태스크들도 그동안 Claude 사용), 원인 불명 실패는
-      // 쿨다운 없이(다음 태스크는 다시 MiniMax부터 시도) 이번만 Claude로 넘어간다.
-      if (code !== 0 && acct.provider === 'minimax') {
-        mmExhausted = true;
-        if (minimax.isUsageLimit(combinedOut)) minimax.noteUsageLimit();
-        console.log(`[TaskManager] task ${taskId}: MiniMax 실패 → Claude 폴백으로 전환`);
-        attempt();
-        return;
-      }
+      // ── 실패 시: checkpoint 저장 후 "이어서" 재개 ─────────────────────────
+      if (code !== 0) {
+        const cp = checkpoint.recordFailure(baseDir, taskId, {
+          attempt: attemptNo, provider, model: modelName, output: combinedOut, cwd: baseDir,
+        });
+        const nextResume = cp.resume_instruction || null;
 
-      // 사용량 한도로 실패 & 아직 안 쓴 계정이 남아 있으면 다음 계정으로 재실행
-      // 한도 메시지("You've hit your weekly limit ...")는 stderr가 아니라 stdout에
-      // 찍히는 경우가 있어(giip-759, PR #430) 두 스트림을 모두 확인한다.
-      if (code !== 0 && acct.provider !== 'minimax' && accounts.isUsageLimit(combinedOut) && tried.size < accounts.count()) {
-        accounts.noteUsageLimit(acct, combinedOut);
-        console.log(`[TaskManager] task ${taskId}: ${acct.name} usage limit → 다음 계정으로 재실행`);
-        attempt();
-        return;
+        // MiniMax(1순위) 실패 → 이번 태스크는 더 이상 MiniMax를 시도하지 않고 Claude 풀로 전환.
+        if (provider === 'minimax') {
+          mmExhausted = true;
+          if (minimax.isUsageLimit(combinedOut)) minimax.noteUsageLimit();
+          console.log(`[TaskManager] task ${taskId}: MiniMax 실패(${cp.error_type}) → Claude 폴백으로 전환${nextResume ? ' (checkpoint 이어서 재개)' : ''}`);
+          attempt(nextResume, 'minimax');
+          return;
+        }
+
+        // 사용량 한도로 실패 & 아직 안 쓴 계정이 남아 있으면 다음 계정으로 재실행
+        // 한도 메시지("You've hit your weekly limit ...")는 stderr가 아니라 stdout에
+        // 찍히는 경우가 있어(giip-759, PR #430) 두 스트림을 모두 확인한다.
+        if (accounts.isUsageLimit(combinedOut) && tried.size < accounts.count()) {
+          accounts.noteUsageLimit(acct, combinedOut);
+          console.log(`[TaskManager] task ${taskId}: ${acct.name} usage limit → 다음 계정으로 재실행${nextResume ? ' (checkpoint 이어서 재개)' : ''}`);
+          attempt(nextResume, `claude:${acct.name}`);
+          return;
+        }
       }
 
       // 결과 파일이 없으면 기본 파일 생성
@@ -544,6 +723,7 @@ ${progressBlock}
       }
 
       if (code === 0) {
+        checkpoint.recordSuccess(baseDir, taskId, { attempt: attemptNo, provider, model: modelName, cwd: baseDir });
         onComplete(resultFile);
       } else {
         onError(new Error(`claude exit ${code}: ${stderr.slice(0, 200)}`), resultFile);
@@ -554,7 +734,12 @@ ${progressBlock}
     return proc;
   }
 
-  return attempt();
+  // 이전 실행이 중단된 채 남아 있으면(재실행/이어하기) 그 checkpoint 로 시작한다.
+  const prior = checkpoint.load(baseDir, taskId);
+  const priorResume = prior && !prior.finished_at ? checkpoint.buildResumeInstruction(prior) : null;
+  if (priorResume) console.log(`[TaskManager] task ${taskId}: 이전 checkpoint 발견 → 완료된 단계부터 이어서 실행`);
+
+  return attempt(priorResume);
 }
 
 // ── 작업 완료: 결과를 태스크 파일에 추가 후 done/ 폴더로 이동 ─────────────────
@@ -1537,5 +1722,10 @@ module.exports = {
   getTaskFileUrl,
   buildContextCatalog,
   selectContextFiles,
+  readSelectedContext,
   normalizeFilesRead,
+  // giip-1063 비용 최적화
+  buildFastPathPlan,
+  upsertContextFilesFrontmatter,
+  stripModelArgs,
 };
