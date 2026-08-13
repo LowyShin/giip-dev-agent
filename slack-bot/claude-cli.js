@@ -5,6 +5,9 @@ const { spawn } = require('child_process');
 const accounts = require('./claude-accounts');
 const minimax = require('./minimax-accounts');
 const { getAgentDir, BASE_DIR, PROJECTS_ROOT } = require('./config');
+const modelConfig = require('./model-config'); // giip-1063: 모델명 하드코딩 제거(중앙 설정)
+const costTracker = require('./cost-tracker');
+const batchPlanner = require('./batch-planner');
 
 // ── spawn → Promise 래퍼 (이벤트 루프 비차단) ────────────────────────────────
 function spawnAsync(cmd, args, opts = {}) {
@@ -72,8 +75,42 @@ async function reAuthClaude(account = null) {
 }
 
 // ── claude CLI (비동기 — 이벤트 루프 비차단) ──────────────────────────────────
-async function callClaude(prompt, workDir = BASE_DIR) {
+/**
+ * Q&A 경로. giip-1063 변경점
+ *  - Claude 폴백 모델을 `claude-opus-4-8` 로 하드코딩하지 않고 model-config(MODEL_QA)에서 읽는다.
+ *  - opts.userText 가 주어지면 한 메시지 안의 독립 조회를 한 번에 처리하도록 배치 지시를 덧붙인다(3.8).
+ *  - 호출마다 토큰/비용/재시도를 cost-tracker 에 기록한다.
+ *
+ * @param {string} prompt
+ * @param {string} [workDir]
+ * @param {object} [opts] { userText, taskId }
+ */
+async function callClaude(prompt, workDir = BASE_DIR, opts = {}) {
   const agentDir = getAgentDir(workDir);
+  // 3.8 배치: 한 메시지 안의 독립 read/search/status 요청만 묶는다(대기시켜 강제 배치하지 않음).
+  let batch = { batchable: false, batch_size: 1, model_calls_saved: 0 };
+  if (opts.userText) {
+    try {
+      batch = batchPlanner.planBatch(opts.userText);
+      if (batch.batchable && batch.instruction) {
+        prompt = `${prompt}\n\n${batch.instruction}`;
+        console.log(`[Bot] 배치 처리: ${batch.batch_size}개 독립 조회 → 모델 호출 ${batch.model_calls_saved}회 절약`);
+      }
+    } catch { /* 배치 판정 실패는 무시 */ }
+  }
+  const logCost = (extra) => {
+    try {
+      costTracker.record(BASE_DIR, {
+        task_id: opts.taskId || null,
+        phase: 'qa',
+        task_class: 'standard',
+        input_chars: prompt.length,
+        batch_size: batch.batch_size,
+        model_calls_saved: batch.model_calls_saved,
+        ...extra,
+      });
+    } catch { /* 계측 실패가 응답을 막지 않는다 */ }
+  };
   const baseArgs = [
     '-p', // プロンプトは argv ではなく stdin で渡す（ENAMETOOLONG 回避）→ spawnAsync opts.input
     // callClaude は Q&A（answerInChannel / handleDM）専用。ファイル変更は
@@ -94,13 +131,20 @@ async function callClaude(prompt, workDir = BASE_DIR) {
   const mm = minimax.resolve();
   if (mm) {
     console.log(`[Bot] MiniMax(${mm.model}) 로 실행(Q&A)`);
+    const t0 = Date.now();
     const result = await spawnAsync('claude', [...baseArgs, '--model', mm.model], {
       cwd: workDir,
       timeout: 20 * 60 * 1000,
       env: minimax.envFor(mm),
       input: prompt,
     });
-    if (result.status === 0) return (result.stdout || '').trim();
+    const out0 = (result.stdout || '').trim();
+    logCost({
+      provider: 'minimax', model: mm.model, attempt: 1, duration_ms: Date.now() - t0,
+      status: result.status === 0 ? 'success' : 'failed', output_chars: out0.length,
+      ...(costTracker.parseUsageFromOutput(`${result.stdout || ''}\n${result.stderr || ''}`) || {}),
+    });
+    if (result.status === 0) return out0;
     const mmOut = `${result.stdout || ''}\n${result.stderr || ''}`;
     if (minimax.isUsageLimit(mmOut)) minimax.noteUsageLimit();
     mmExhausted = true;
@@ -114,8 +158,11 @@ async function callClaude(prompt, workDir = BASE_DIR) {
     const acct = accounts.pickAccount();
     if (!acct) break; // 전 계정 쿨다운
     const env = accounts.envFor(acct);
-    const args = [...baseArgs, '--model', 'claude-opus-4-8'];
+    // giip-1063: Q&A 에 최상위 모델을 고정하지 않는다. MODEL_QA(기본 MODEL_FALLBACK_STANDARD).
+    const qaModel = modelConfig.qaModel();
+    const args = [...baseArgs, '--model', qaModel];
 
+    const t1 = Date.now();
     const result = await spawnAsync('claude', args, {
       cwd: workDir,
       timeout: 20 * 60 * 1000, // 20分
@@ -123,7 +170,14 @@ async function callClaude(prompt, workDir = BASE_DIR) {
       input: prompt, // 프롬프트는 stdin 으로 (ENAMETOOLONG 회피)
     }); // ETIMEDOUT 등은 그대로 throw
 
-    if (result.status === 0) return (result.stdout || '').trim();
+    const out1 = (result.stdout || '').trim();
+    logCost({
+      provider: 'claude', model: qaModel, attempt: attempt + 1, duration_ms: Date.now() - t1,
+      status: result.status === 0 ? 'success' : 'failed', output_chars: out1.length,
+      fallback_from: mmExhausted ? 'minimax' : null,
+      ...(costTracker.parseUsageFromOutput(`${result.stdout || ''}\n${result.stderr || ''}`) || {}),
+    });
+    if (result.status === 0) return out1;
 
     // 사용량 한도 → 해당 계정 쿨다운 후 다음 계정으로
     // 한도 메시지("You've hit your weekly limit ...")는 stderr가 아니라 stdout에

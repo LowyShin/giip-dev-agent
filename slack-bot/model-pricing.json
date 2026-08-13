@@ -1,0 +1,18 @@
+{
+  "_readme": [
+    "모델별 토큰 단가(USD / 1M tokens). cost-tracker 가 estimated_cost_usd 를 계산할 때만 쓴다.",
+    "이 봇은 Claude 구독 계정과 MiniMax Token Plan(정액제)으로 동작하므로 종량제 단가가 그대로",
+    "적용되지 않는다. 그래서 기본값은 비워 둔다 — 값이 없으면 비용을 지어내지 않고 토큰 수만",
+    "기록한다(estimated_cost_usd: null).",
+    "실제 단가를 확인했다면 아래 models 에 추가하라. as_of(기준일)와 source(출처)는 필수다.",
+    "예:",
+    "  \"models\": {",
+    "    \"sonnet\": { \"input_per_mtok\": 0.0, \"output_per_mtok\": 0.0, \"as_of\": \"YYYY-MM-DD\", \"source\": \"https://...\" }",
+    "  }"
+  ],
+  "currency": "USD",
+  "unit": "per_1M_tokens",
+  "as_of": null,
+  "source": null,
+  "models": {}
+}

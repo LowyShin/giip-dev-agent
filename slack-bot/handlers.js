@@ -153,7 +153,8 @@ MANDATORY RULE — Task Number: If the user's message contains a 14-digit task n
   catch (e) { console.error('[Bot] answer snapshot error:', e.message); }
 
   try {
-    const reply = await callClaude(prompt, workDir);
+    // giip-1063: userText 를 넘겨 한 메시지 안의 독립 조회를 한 번에 처리하도록(배치)
+    const reply = await callClaude(prompt, workDir, { userText: text });
     // 코드레벨 강제: 사용자 메시지의 태스크 ID가 응답에 없으면 첫 줄에 삽입
     const missingIds = extractExistingTaskIds(text).filter(id => !reply.includes(id));
     const finalReply = missingIds.length > 0
@@ -208,6 +209,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
       '• `!issues` — GitHub Issue 一覧',
       '• `!issues refresh` — Issue 強制更新',
       '• `!klayer <キーワード>` — K-Layer 知識検索',
+      '• `!cost` / `!cost today` / `!cost task <id>` / `!cost models` — 토큰·비용 리포트',
       '• `!reset` — 会話履歴リセット',
       '',
       '*giip issue 連携:*',
@@ -234,6 +236,12 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
   if (cmd === '!reset') {
     conversations[convKey] = [];
     await postMessage(channelId, '会話履歴をリセットしました。', replyTs);
+    return;
+  }
+  // giip-1063: 토큰·비용 리포트 (`!cost` / `!cost today` / `!cost task <id>` / `!cost models`)
+  if (cmd === '!cost' || cmd.startsWith('!cost ')) {
+    const arg = text.trim().slice('!cost'.length).trim();
+    await postMessage(channelId, require('./cost-tracker').report(BASE_DIR, arg), replyTs);
     return;
   }
   if (cmd === '!issues' || cmd === '!issues refresh') {
@@ -292,7 +300,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
   prompt += `\n\nUser: ${text}\nAssistant:`;
 
   try {
-    const reply = await callClaude(prompt, workDir);
+    const reply = await callClaude(prompt, workDir, { userText: text }); // giip-1063: 배치 처리 힌트
     if (!conversations[convKey]) conversations[convKey] = [];
     conversations[convKey].push({ role: 'user', content: text });
     conversations[convKey].push({ role: 'assistant', content: reply });
@@ -812,6 +820,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
       '*情報:*',
       '• `!issues` — GitHub Issue 一覧',
       '• `!klayer <キーワード>` — K-Layer 検索',
+      '• `!cost` / `!cost today` / `!cost task <id>` / `!cost models` — 토큰·비용 리포트',
       '• `allowlist` — 허용된 user/channel 화이트리스트 표시',
       '• `!help` — ヘルプ',
     ].join('\n'), replyTs);
@@ -832,6 +841,12 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     const kw = cmd.slice(8).trim();
     const claims = searchKLayer(kw);
     await postMessage(channelId, claims.length ? `K-Layer "${kw}":\n${claims.map(c=>`• ${c}`).join('\n')}` : `"${kw}" に関連する claim はありません`, replyTs);
+    return;
+  }
+  // giip-1063: 토큰·비용 리포트 (`!cost` / `!cost today` / `!cost task <id>` / `!cost models`)
+  if (cmd === '!cost' || cmd.startsWith('!cost ')) {
+    const arg = text.trim().slice('!cost'.length).trim();
+    await postMessage(channelId, require('./cost-tracker').report(BASE_DIR, arg), replyTs);
     return;
   }
 
@@ -1402,13 +1417,19 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
   // 修正依頼（既存タスクID言及）の場合は親タスク文脈を本文に付加して分析・保存する
   const taskRequestText = text + refTaskContext;
 
-  let planContent, filesRead;
+  let planContent, filesRead, classification, contextStats, fastPath;
   try {
-    ({ planContent, filesRead } = tm.analyzeRequest(taskRequestText, null, workDir));
+    ({ planContent, filesRead, classification, contextStats, fastPath } =
+      tm.analyzeRequest(taskRequestText, null, workDir));
   } catch (err) {
     await postMessage(channelId, `分析エラー: ${err.message}`, replyTs);
     return;
   }
+  // giip-1063: 분석에서 결정한 작업 등급/Fast Path 여부를 태스크 파일에 남겨 실행 단계가 재사용한다.
+  const taskMeta = {
+    taskClass: (classification && classification.class) || 'standard',
+    fastPath: !!fastPath,
+  };
 
   const taskTitle = tm.extractTitle(planContent);
   const taskSummary = tm.extractSummary(planContent);
@@ -1435,8 +1456,8 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
   // ID 통일: 기존 태스크 갱신이면 그 ID, 신규+issue 등록 성공이면 giip-<isn>, 그 외엔 타임스탬프.
   const taskId = reuseTaskId || (giipIsn ? `giip-${giipIsn}` : tm.getTimestampId());
   const taskFile = reuseTaskId
-    ? tm.updateTaskFile(taskId, taskRequestText, planContent, filesRead)
-    : tm.createTaskFile(taskId, taskRequestText, planContent, filesRead);
+    ? tm.updateTaskFile(taskId, taskRequestText, planContent, filesRead, taskMeta)
+    : tm.createTaskFile(taskId, taskRequestText, planContent, filesRead, taskMeta);
 
   taskState.pending[convKey] = { taskId, taskTitle, taskFile, requestText: taskRequestText, workDir };
   if (giipIsn) taskState.pending[convKey].isn = giipIsn;
@@ -1462,8 +1483,14 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     : `*実行: \`go ${taskId}\` / キャンセル: \`cancel ${taskId}\`*`;
 
   const headline = (reuseTaskId && !linkedIsn) ? 'Task 更新完了' : 'Task 分析完了';
+  // giip-1063: 어떤 등급으로 분류해 어떤 컨텍스트를 실었는지 한 줄로 보인다(비용 가시성).
+  const routeLine = classification
+    ? `\n🧭 등급: \`${classification.class}\`${fastPath ? ' (Fast Path — 계획 생성 호출 생략)' : ''}`
+      + ` / 컨텍스트 ${contextStats ? contextStats.files : filesRead.length}개 파일`
+      + `${contextStats ? ` · ${contextStats.chars.toLocaleString()}자` : ''}`
+    : '';
   await postLong(channelId,
-    `📋 *${headline}* (\`${taskId}\`)${isnLine}${closedNotice}\n\n${planContent}\n\n---\n${footer}`,
+    `📋 *${headline}* (\`${taskId}\`)${isnLine}${routeLine}${closedNotice}\n\n${planContent}\n\n---\n${footer}`,
     replyTs
   );
 

@@ -134,7 +134,8 @@ Reply with only one word: "task" or "question". No explanation needed.`;
 
   try {
     const acct = accounts.pickAccount();
-    const result = await spawnAsync('claude', ['-p', '--model', 'claude-opus-4-8'], {
+    // giip-1063: 분류(task/question 1단어 판정)에 최상위 모델을 쓰지 않는다 — MODEL_CLASSIFIER.
+    const result = await spawnAsync('claude', ['-p', '--model', require('./model-config').classifierModel()], {
       cwd: workDir,
       timeout: 60000,
       env: accounts.envFor(acct),

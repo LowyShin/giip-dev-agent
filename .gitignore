@@ -17,3 +17,6 @@ slack-bot/tasklist.json
 # slack-bot giip 계정 시크릿(SK) — 실값 비커밋, *.sample 만 추적
 slack-bot/.secrets/*
 !slack-bot/.secrets/*.sample.json
+
+# giip-1063: 비용 로그 / 재시도 checkpoint 등 런타임 산출물 (머신 로컬, 커밋 금지)
+.agent/runtime/
