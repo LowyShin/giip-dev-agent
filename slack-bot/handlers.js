@@ -209,7 +209,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
       '• `!issues` — GitHub Issue 一覧',
       '• `!issues refresh` — Issue 強制更新',
       '• `!klayer <キーワード>` — K-Layer 知識検索',
-      '• `!cost` / `!cost today` / `!cost task <id>` / `!cost models` — 토큰·비용 리포트',
+      '• `!cost` / `!cost today` / `!cost task <id>` / `!cost models` / `!cost detail` — 토큰·비용 리포트 (detail 은 가정 절감값까지 표시)',
       '• `!reset` — 会話履歴リセット',
       '',
       '*giip issue 連携:*',
@@ -820,7 +820,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
       '*情報:*',
       '• `!issues` — GitHub Issue 一覧',
       '• `!klayer <キーワード>` — K-Layer 検索',
-      '• `!cost` / `!cost today` / `!cost task <id>` / `!cost models` — 토큰·비용 리포트',
+      '• `!cost` / `!cost today` / `!cost task <id>` / `!cost models` / `!cost detail` — 토큰·비용 리포트 (detail 은 가정 절감값까지 표시)',
       '• `allowlist` — 허용된 user/channel 화이트리스트 표시',
       '• `!help` — ヘルプ',
     ].join('\n'), replyTs);
@@ -1426,8 +1426,11 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     return;
   }
   // giip-1063: 분석에서 결정한 작업 등급/Fast Path 여부를 태스크 파일에 남겨 실행 단계가 재사용한다.
+  // giip-1068 10.2: 실행 등급(task_class)과 별개로 조작 종류/조회 위험도도 남긴다.
   const taskMeta = {
     taskClass: (classification && classification.class) || 'standard',
+    riskClass: (classification && classification.risk_class) || 'none',
+    operation: (classification && classification.operation) || 'write',
     fastPath: !!fastPath,
   };
 

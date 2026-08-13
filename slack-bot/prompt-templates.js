@@ -1,5 +1,5 @@
 /**
- * prompt-templates.js — 고정 prefix 를 갖는 프롬프트 중앙 관리 (giip-1063, 3.6)
+ * prompt-templates.js — 고정 prefix 를 갖는 프롬프트 중앙 관리 (giip-1063 3.6 / giip-1068 4)
  *
  * 프롬프트 캐시가 지원되는 모델에서 캐시 적중률을 높이려면, 매 호출마다 바뀌는 값이
  * 프롬프트 앞부분에 있으면 안 된다. 그래서 아래 순서를 강제한다.
@@ -12,10 +12,17 @@
  *   6. 태스크 내용
  *   7. checkpoint 및 동적 상태  ← 현재 시각/taskID/브랜치/재시도 번호/변경 파일은 전부 여기
  *
+ * giip-1068: 최초 실행과 fallback 재개를 완전히 다른 함수로 분리했다.
+ *   buildInitialExecutionPrompt() — 전체 태스크 사양 + 선택 컨텍스트 전체
+ *   buildResumeExecutionPrompt()  — 태스크 "요약" + 재개 전용 컨텍스트(최대 3개) + 진행 상태
+ * 재개 프롬프트는 최초 프롬프트의 60% 를 넘지 않도록 조립 단계에서 잘라낸다.
+ *
  * 템플릿을 바꿀 때만 PROMPT_VERSION 을 올린다.
  */
 
-const PROMPT_VERSION = 'fde-cost-v1';
+const modelConfig = require('./model-config');
+
+const PROMPT_VERSION = 'fde-cost-v2';
 
 // ── 1. 고정 시스템 역할 ──────────────────────────────────────────────────────
 const SYSTEM_ROLE = `You are a senior software engineer working in a GIIP FDE Agent workspace.
@@ -29,6 +36,38 @@ const SAFETY_RULES = `=== 안전 규칙 (고정) ===
 - .env 내용, API key, 토큰, 인증정보를 출력·로그·보고서에 남기지 마라.
 - 비용 절감을 이유로 테스트와 검증을 생략하지 마라. 최소 1건의 재현 검증을 반드시 수행하라.
 - 실패를 성공으로 보고하지 마라. 부분 완료면 부분 완료라고 써라.`;
+
+// ── 재개 전용 안전 규칙 (giip-1068 4.4-2) ────────────────────────────────────
+const RESUME_SAFETY_RULES = `=== 재개 전용 안전 규칙 (고정) ===
+- 아래 "완료된 단계"를 다시 실행하지 마라. 완료 단계의 재실행은 0회여야 한다.
+- 아래 "이미 변경한 파일"을 전면 재작성하지 마라. 필요한 부분만 이어서 고쳐라.
+- 작업 트리의 기존 변경은 이전 시도의 결과다. 되돌리거나 덮어쓰지 마라.
+- 태스크 전체 사양이 아니라 아래 "태스크 요약"과 "미완료 단계"만 근거로 이어서 진행하라.
+  더 자세한 사양이 정말 필요하면 태스크 파일 경로를 직접 읽어라(프롬프트에 다시 싣지 않는다).
+- git 커밋·push·PR·브랜치 전환은 하지 마라. .env/API key/토큰을 출력하지 마라.
+- 실패를 성공으로 보고하지 마라.`;
+
+// ── 5.5 진행 이벤트 기록 규칙 (고정) ─────────────────────────────────────────
+const PROGRESS_EVENT_RULES = `=== 진행 이벤트 기록 (고정, 필수) ===
+각 중요 단계가 끝날 때 진행 이벤트를 기록하라. 이 기록이 없으면 중간에 실패했을 때 다음 모델이
+처음부터 다시 하게 되어 비용이 두 배로 든다.
+
+필수 기록 시점:
+1. 계획 단계 시작        → --type step_started
+2. 각 계획 단계 완료      → --type step_completed
+3. 파일을 처음 읽었을 때   → --type file_read
+4. 파일을 실제로 변경했을 때 → --type file_changed
+5. 명령이나 테스트를 실행했을 때 → --type command_run / --type test_result
+6. 중요한 판단을 했을 때   → --type decision
+7. 막힘이 발생했을 때     → --type blocked
+
+JSON 파일을 직접 편집하지 말고 반드시 아래 전용 CLI 를 써라(입력 검증·비밀값 마스킹이 들어 있다).
+
+  node <slack-bot>/tools/progress-event.js --task <task-id> --attempt <n> --type <type> \\
+    --step <step-id> --path <상대경로> --summary "<한 줄 요약>"
+
+정확한 명령은 아래 "동적 상태" 절의 progress_event_command 를 그대로 쓴다.
+--path 는 저장소 기준 상대경로로 적는다(절대경로 금지). --summary 는 500자 이내.`;
 
 // ── 3. 고정 실행 프로토콜 ────────────────────────────────────────────────────
 const EXECUTION_PROTOCOL = `=== 실행 프로토콜 (고정) ===
@@ -76,12 +115,129 @@ const FAST_PATH_PROTOCOL = `=== Fast Path 실행 프로토콜 (고정, 단순 �
 5. 작업이 위 범위를 넘어선다고 판단되면(3개 초과 파일, 인증/보안/DB/배포 변경, 삭제·대량 변경)
    즉시 중단하고 결과 보고서에 "Fast Path 부적합 — 일반 경로로 승격 필요"라고 명시하라.`;
 
+// 재개 전용 실행 프로토콜 — 전체 프로토콜을 다시 싣지 않는다(길이 절감).
+const RESUME_PROTOCOL = `=== 재개 실행 프로토콜 (고정) ===
+1. 아래 "미완료 단계"의 첫 항목부터 이어서 수행한다. 완료된 단계는 건너뛴다.
+2. "이미 변경한 파일"은 현재 작업 트리에 그대로 있다. 필요하면 읽어서 확인만 하고 다시 쓰지 마라.
+3. 테스트 단계에서 실패했다면 구현을 처음부터 다시 하지 말고 실패한 검증부터 처리한다.
+4. 진행 이벤트를 계속 기록한다(아래 progress_event_command).
+5. 완료되면 "동적 상태"의 result_report_path 에 결과 보고서를 작성한다. 이전 시도에서 이미
+   보고서가 있으면 새로 쓰지 말고 이어서 갱신한다.`;
+
 function section(title, body) {
   return body && String(body).trim() ? `\n\n${title}\n${String(body).trim()}` : '';
 }
 
+// ── 태스크 사양 축약 (4.4) ───────────────────────────────────────────────────
+const TASK_SUMMARY_LIMITS = {
+  purposeChars: 500,
+  successConditions: 10,
+  impactTargets: 20,
+  prohibitions: 10,
+  totalChars: 3000,
+};
+
+function bulletItems(block, max) {
+  if (!block) return [];
+  return String(block)
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => /^(\d+[.)]|[-*•])\s+\S/.test(l))
+    .map(l => l.replace(/^(\d+[.)]|[-*•])\s+/, '').trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function sectionBody(text, headingRe) {
+  const m = String(text || '').match(headingRe);
+  return m ? m[1] : '';
+}
+
 /**
- * 실행 프롬프트. 1~3 은 완전히 고정된 문자열이므로 태스크가 달라도 prefix 가 동일하다.
+ * 전체 태스크 사양 → 재개 프롬프트용 요약(4.4).
+ * 전체 taskContent 를 그대로 싣지 않기 위한 핵심 함수. 전체 상한 3,000자.
+ */
+function summarizeTaskSpec(taskContent, opts = {}) {
+  const lim = { ...TASK_SUMMARY_LIMITS, ...(opts.limits || {}) };
+  const text = String(taskContent || '');
+  // frontmatter 는 재개에 필요 없다(경로/등급은 동적 상태 절에 따로 들어간다).
+  const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+
+  const title = (body.match(/^#\s*TASK:\s*(.+)$/m) || body.match(/^#\s+(.+)$/m) || [, ''])[1] || '';
+
+  let purpose = sectionBody(body, /##\s*(?:요청\s*내용|목적|概要|Request)[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i).trim();
+  if (!purpose) {
+    purpose = body.replace(/^#[^\n]*\n/, '').split(/\n##\s/)[0].trim();
+  }
+  purpose = `${title ? `${title} — ` : ''}${purpose}`.replace(/\s+/g, ' ').trim().slice(0, lim.purposeChars);
+
+  const success = bulletItems(
+    sectionBody(body, /##\s*(?:실행\s*계획|성공\s*조건|완료\s*조건|Steps?|Plan)[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i),
+    lim.successConditions);
+  const impact = bulletItems(
+    sectionBody(body, /##\s*(?:영향\s*파일[^\n]*|영향\s*대상|대상\s*파일|Impact)[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i),
+    lim.impactTargets);
+  const prohibitions = bulletItems(
+    sectionBody(body, /##\s*(?:주의사항|금지사항|제약|Notes?|Caution)[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i),
+    lim.prohibitions);
+
+  const lines = ['## 태스크 요약'];
+  lines.push(`- 목적: ${purpose || '(태스크 파일 참조)'}`);
+  if (success.length) {
+    lines.push('- 성공 조건:');
+    success.forEach((s, i) => lines.push(`  ${i + 1}. ${s.slice(0, 200)}`));
+  }
+  if (impact.length) {
+    lines.push('- 영향 대상:');
+    impact.forEach(s => lines.push(`  - ${s.slice(0, 200)}`));
+  }
+  if (prohibitions.length) {
+    lines.push('- 금지사항:');
+    prohibitions.forEach(s => lines.push(`  - ${s.slice(0, 200)}`));
+  }
+
+  let out = lines.join('\n');
+  if (out.length > lim.totalChars) out = `${out.slice(0, lim.totalChars - 20)}\n…(요약 상한 초과)`;
+  return out;
+}
+
+// ── 길이 상한 적용 ───────────────────────────────────────────────────────────
+/**
+ * 조립된 파트들을 예산 안으로 줄인다. 우선순위가 낮은 파트부터 잘라낸다.
+ * 고정 파트(역할/안전규칙/프로토콜/동적 상태)는 자르지 않는다.
+ */
+const MIN_RESUME_PROMPT_CHARS = 3000;
+
+const RESUME_TRIM_ORDER = [
+  'resume_context', 'diff_summary', 'files_read', 'prev_error',
+  'commands', 'test_results', 'decisions', 'task_summary', 'files_changed', 'completed_steps',
+];
+
+function joinParts(parts) {
+  return parts.filter(p => p.text && String(p.text).trim()).map(p => p.text).join('');
+}
+
+function fitParts(parts, budget, trimOrder) {
+  let out = joinParts(parts);
+  if (out.length <= budget) return { text: out, trimmed: [] };
+  const trimmed = [];
+  for (const name of trimOrder) {
+    if (out.length <= budget) break;
+    const p = parts.find(x => x.name === name && x.text && x.text.length > 0);
+    if (!p) continue;
+    const over = out.length - budget;
+    if (p.text.length <= over + 60) { p.text = ''; }
+    else { p.text = `${p.text.slice(0, p.text.length - over - 40)}\n…(길이 제한으로 생략)`; }
+    trimmed.push(name);
+    out = joinParts(parts);
+  }
+  if (out.length > budget) out = `${out.slice(0, budget - 30)}\n…(프롬프트 상한 초과分 생략)`;
+  return { text: out, trimmed };
+}
+
+// ── 최초 실행 프롬프트 (4.3) ─────────────────────────────────────────────────
+/**
+ * 최초 실행 프롬프트. 1~3 은 완전히 고정된 문자열이므로 태스크가 달라도 prefix 가 동일하다.
  *
  * @param {object} p
  *  - fastPath        {boolean} Fast Path 프로토콜 사용
@@ -91,27 +247,30 @@ function section(title, body) {
  *  - taskContent     {string}  태스크 사양(계획 포함)
  *  - kLayerClaims    {string[]}
  *  - taskId, branch, resultFile, isn, addCommentScript, attempt, taskClass, now
- *  - resumeInstruction {string|null} checkpoint 재개 지시문
+ *  - progressEventCommand {string|null}
+ *  - resumeInstruction {string|null} (하위 호환 — 재개는 buildResumeExecutionPrompt 를 쓸 것)
  */
-function buildExecutionPrompt(p = {}) {
-  const out = [];
+function buildInitialExecutionPrompt(p = {}) {
+  const parts = [];
+  const push = (name, text) => parts.push({ name, text });
 
   // 1~3: 고정
-  out.push(SYSTEM_ROLE);
-  out.push(`\nprompt_version: ${PROMPT_VERSION}`);
-  out.push(`\n${SAFETY_RULES}`);
-  out.push(`\n${p.fastPath ? FAST_PATH_PROTOCOL : EXECUTION_PROTOCOL}`);
+  push('role', SYSTEM_ROLE);
+  push('version', `\nprompt_version: ${PROMPT_VERSION}`);
+  push('safety', `\n${SAFETY_RULES}`);
+  push('protocol', `\n${p.fastPath ? FAST_PATH_PROTOCOL : EXECUTION_PROTOCOL}`);
+  push('progress_rules', `\n\n${PROGRESS_EVENT_RULES}`);
 
   // 4: 선택된 컨텍스트 (같은 태스크를 재시도해도 동일 → 재시도 간 캐시 적중)
-  out.push(section('=== 선택된 컨텍스트 (role/rule/skill — 이 태스크에 관련된 것만) ===',
+  push('context', section('=== 선택된 컨텍스트 (role/rule/skill — 이 태스크에 관련된 것만) ===',
     p.contextText || '(선택된 컨텍스트 없음 — 최소 기본 규칙만 적용)'));
   if (Array.isArray(p.contextFiles) && p.contextFiles.length) {
-    out.push(section('=== 컨텍스트 선택 사유 ===',
+    push('context_reasons', section('=== 컨텍스트 선택 사유 ===',
       p.contextFiles.map(f => `- ${f.path} — ${f.reason}`).join('\n')));
   }
 
   // 5: 프로젝트 정보
-  out.push(section('=== 프로젝트 정보 ===', [
+  push('project', section('=== 프로젝트 정보 ===', [
     `project: ${p.projectName || '(unknown)'}`,
     `working_directory: ${p.baseDir || ''}`,
     `base_branch: ${p.baseBranch || ''}`,
@@ -119,12 +278,31 @@ function buildExecutionPrompt(p = {}) {
   ].join('\n')));
 
   // 6: 태스크 내용
-  out.push(section('=== 태스크 ===', p.taskContent || ''));
+  push('task', section('=== 태스크 ===', p.taskContent || ''));
   if (Array.isArray(p.kLayerClaims) && p.kLayerClaims.length) {
-    out.push(section('=== K-Layer 지식 ===', p.kLayerClaims.map(c => `• ${c}`).join('\n')));
+    push('klayer', section('=== K-Layer 지식 ===', p.kLayerClaims.map(c => `• ${c}`).join('\n')));
   }
 
   // 7: 동적 상태 (매 호출 달라지는 값은 전부 여기)
+  push('dynamic', section('=== 동적 상태 ===', dynamicState(p).join('\n')));
+
+  if (p.resumeInstruction) {
+    push('resume_legacy', section('=== 이어서 재개 (checkpoint) ===', p.resumeInstruction));
+  }
+
+  push('tail', '\n\n지금 바로 작업을 시작하세요.');
+
+  const budget = (p.limits && p.limits.initialMaxChars)
+    || modelConfig.promptLimits(p.taskClass).initialMaxChars;
+  const { text, trimmed } = fitParts(parts, budget,
+    ['context', 'klayer', 'task', 'context_reasons']);
+  if (trimmed.length) {
+    console.warn(`[prompt] 최초 프롬프트가 ${p.taskClass || 'standard'} 상한(${budget}자)을 넘어 축약: ${trimmed.join(', ')}`);
+  }
+  return text;
+}
+
+function dynamicState(p) {
   const dyn = [
     `task_id: ${p.taskId || ''}`,
     `task_class: ${p.taskClass || 'standard'}`,
@@ -133,20 +311,124 @@ function buildExecutionPrompt(p = {}) {
     `now: ${p.now || new Date().toISOString()}`,
     `result_report_path: ${p.resultFile || ''}`,
   ];
+  if (p.progressEventCommand) dyn.push(`progress_event_command: ${p.progressEventCommand}`);
   if (p.isn) {
     dyn.push(`giip_isn: ${p.isn}`);
     if (p.addCommentScript) {
       dyn.push(`progress_comment_command: pwsh -File "${p.addCommentScript}" -isn ${p.isn} -content "<본문>" -issuetype note -author "slack-bot"`);
     }
   }
-  out.push(section('=== 동적 상태 ===', dyn.join('\n')));
+  return dyn;
+}
 
-  if (p.resumeInstruction) {
-    out.push(section('=== 이어서 재개 (checkpoint) ===', p.resumeInstruction));
+// ── 재개 프롬프트 (4.4) ──────────────────────────────────────────────────────
+function listBlock(items, max, prefix = '  - ') {
+  const list = (items || []).slice(0, max);
+  if (!list.length) return '';
+  const extra = (items || []).length > max ? `\n${prefix}…외 ${(items || []).length - max}건` : '';
+  return list.map(i => `${prefix}${typeof i === 'string' ? i : JSON.stringify(i)}`).join('\n') + extra;
+}
+
+/**
+ * fallback 재개 프롬프트. 전체 taskContent 와 최초 선택 컨텍스트 전체를 절대 싣지 않는다.
+ *
+ * @param {object} p
+ *  - taskSummary        {string}   summarizeTaskSpec() 결과 (없으면 taskContent 로부터 생성)
+ *  - taskContent        {string}   (taskSummary 미지정 시 축약용)
+ *  - completedSteps     {string[]}
+ *  - pendingSteps       {string[]}
+ *  - filesRead          {string[]}
+ *  - filesChanged       {string[]} 실제 소스 변경 파일(상대경로)
+ *  - diffSummary        {string}
+ *  - commandsRun        {string[]}
+ *  - testResults        {Array}
+ *  - decisions          {string[]}
+ *  - blocked            {string[]}
+ *  - errorSummary       {string}
+ *  - resumeContextText  {string}   resume-context-builder 결과 (최대 3~4개 파일)
+ *  - resumeContextFiles {Array}
+ *  - taskClass, taskId, branch, attempt, now, resultFile, isn, addCommentScript,
+ *    projectName, baseBranch, langName, progressEventCommand
+ *  - initialPromptChars {number}   최초 프롬프트 길이(60% 규칙 적용용)
+ */
+function buildResumeExecutionPrompt(p = {}) {
+  const parts = [];
+  const push = (name, text) => parts.push({ name, text });
+
+  // 1~2: 고정 역할 + 재개 전용 안전 규칙
+  push('role', SYSTEM_ROLE);
+  push('version', `\nprompt_version: ${PROMPT_VERSION} (resume)`);
+  push('safety', `\n${RESUME_SAFETY_RULES}`);
+  push('protocol', `\n\n${RESUME_PROTOCOL}`);
+
+  // 3: 태스크 요약 (전체 사양 아님)
+  const summary = p.taskSummary || summarizeTaskSpec(p.taskContent || '');
+  push('task_summary', section('=== 태스크 요약 (전체 사양 아님) ===', summary));
+
+  // 4~5: 완료 / 미완료 단계
+  push('completed_steps', section('=== 완료된 단계 (다시 하지 마라) ===',
+    listBlock(p.completedSteps, 30) || '(기록된 완료 단계 없음)'));
+  push('pending_steps', section('=== 미완료 단계 (여기부터 이어서) ===',
+    listBlock(p.pendingSteps, 30) || '(진행 이벤트에 미완료 단계 기록 없음 — 변경 파일과 오류로 판단하라)'));
+
+  // 6~7: 이미 읽은 파일 / 이미 변경한 파일
+  push('files_read', section('=== 이미 읽은 파일 (다시 통독하지 마라) ===', listBlock(p.filesRead, 40)));
+  push('files_changed', section('=== 이미 변경한 파일 (전면 재작성 금지) ===',
+    listBlock(p.filesChanged, 40) || '(실제 소스 변경 없음)'));
+
+  // 8: 변경 diff 요약
+  push('diff_summary', section('=== 변경 diff 요약 ===', p.diffSummary || ''));
+
+  // 9~10: 실행한 명령 / 테스트 결과
+  push('commands', section('=== 실행한 명령 ===', listBlock(p.commandsRun, 20)));
+  push('test_results', section('=== 테스트 결과 ===',
+    listBlock((p.testResults || []).map(t => (typeof t === 'string'
+      ? t
+      : `${t.command || '(명령 미기재)'} → ${t.status || 'unknown'}${t.summary ? ` — ${t.summary}` : ''}`)), 20)));
+  push('decisions', section('=== 이전 판단 / 막힘 ===',
+    [listBlock(p.decisions, 10), listBlock(p.blocked, 10, '  ! ')].filter(Boolean).join('\n')));
+
+  // 11: 이전 오류
+  push('prev_error', section('=== 이전 오류 (마스킹됨) ===',
+    p.errorSummary ? String(p.errorSummary).slice(-1200) : ''));
+
+  // 12: 재개에 필요한 컨텍스트만
+  push('resume_context', section('=== 재개 컨텍스트 (최초 선택 전체가 아니라 재개에 필요한 것만) ===',
+    p.resumeContextText || ''));
+  if (Array.isArray(p.resumeContextFiles) && p.resumeContextFiles.length) {
+    push('resume_context_reasons', section('=== 재개 컨텍스트 선택 사유 ===',
+      p.resumeContextFiles.map(f => `- ${f.path} — ${f.reason}`).join('\n')));
   }
 
-  out.push('\n\n지금 바로 작업을 시작하세요.');
-  return out.join('');
+  // 13: 현재 동적 상태
+  push('dynamic', section('=== 동적 상태 ===', [
+    ...dynamicState(p),
+    `prompt_type: resume`,
+    p.taskFilePath ? `task_spec_file: ${p.taskFilePath} (필요할 때만 직접 읽어라)` : '',
+  ].filter(Boolean).join('\n')));
+
+  push('tail', '\n\n미완료 단계부터 즉시 이어서 작업하세요.');
+
+  const limits = p.limits || modelConfig.promptLimits(p.taskClass);
+  let budget = limits.resumeMaxChars;
+  const initialChars = Number(p.initialPromptChars) || 0;
+  if (initialChars > 0) {
+    // 60% 규칙(2.2). 다만 고정 역할·안전규칙·프로토콜이 잘려나갈 정도로 작아지지는 않게 바닥을 둔다.
+    // 바닥(3,000자)이 실제로 걸리는 구간(최초 5,000자 미만)은 2.2 의 "12,000자 이하" 예외 구간이라
+    // 애초에 재개 프롬프트 대신 동일 프롬프트 재사용이 허용된다(판정은 task-manager).
+    budget = Math.max(MIN_RESUME_PROMPT_CHARS,
+      Math.min(budget, Math.floor(initialChars * limits.resumeMaxRatio)));
+  }
+  const { text, trimmed } = fitParts(parts, budget, RESUME_TRIM_ORDER);
+  if (trimmed.length) {
+    console.log(`[prompt] 재개 프롬프트를 ${budget}자 예산에 맞춰 축약: ${trimmed.join(', ')}`);
+  }
+  return text;
+}
+
+/** 하위 호환. 기존 호출부는 최초 실행 프롬프트를 만든다. */
+function buildExecutionPrompt(options) {
+  return buildInitialExecutionPrompt(options);
 }
 
 // ── 분석(계획) 프롬프트 ──────────────────────────────────────────────────────
@@ -215,10 +497,18 @@ module.exports = {
   PROMPT_VERSION,
   SYSTEM_ROLE,
   SAFETY_RULES,
+  RESUME_SAFETY_RULES,
+  PROGRESS_EVENT_RULES,
   EXECUTION_PROTOCOL,
+  RESUME_PROTOCOL,
   FAST_PATH_PROTOCOL,
   ANALYSIS_ROLE,
   ANALYSIS_FORMAT,
+  TASK_SUMMARY_LIMITS,
+  MIN_RESUME_PROMPT_CHARS,
+  summarizeTaskSpec,
+  buildInitialExecutionPrompt,
+  buildResumeExecutionPrompt,
   buildExecutionPrompt,
   buildAnalysisPrompt,
   buildContextSelectionPrompt,

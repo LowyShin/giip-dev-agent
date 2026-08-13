@@ -82,18 +82,91 @@ function retryLimits() {
   };
 }
 
-/** 컨텍스트 자동 주입 한도(3.1). */
-function contextLimits() {
-  const n = (name, def) => {
-    const v = Number(process.env[name]);
-    return Number.isFinite(v) && v > 0 ? v : def;
-  };
+function numEnv(name, def) {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : def;
+}
+
+function normTier(taskClass) {
+  return TIERS.includes(taskClass) ? taskClass : 'standard';
+}
+
+// ── 등급별 한도표 (giip-1068, 2.1~2.3) ────────────────────────────────────────
+// 1차 작업에서는 모든 등급에 48,000자를 일괄 적용했다. 등급별로 나눈다.
+const CONTEXT_TOTAL_BY_CLASS = { trivial: 12000, standard: 24000, complex: 40000, critical: 64000 };
+const PROMPT_INITIAL_BY_CLASS = { trivial: 24000, standard: 48000, complex: 80000, critical: 120000 };
+const PROMPT_RESUME_BY_CLASS = { trivial: 12000, standard: 24000, complex: 40000, critical: 64000 };
+
+/** 재개 프롬프트는 최초 프롬프트의 이 비율을 넘으면 안 된다(2.2). */
+const RESUME_PROMPT_MAX_RATIO = 0.60;
+/** 재개 프롬프트인데 감소율이 이 값보다 작으면 경고를 남긴다(13). */
+const RESUME_REDUCTION_WARN_RATIO = 0.40;
+/** 최초 프롬프트가 이 길이 이하면 60% 규칙 예외(동일 프롬프트 재사용 허용, 2.2). */
+const SMALL_PROMPT_EXEMPT_CHARS = 12000;
+
+/**
+ * 컨텍스트 자동 주입 한도(3.1 / giip-1068 2.3).
+ * @param {string} [taskClass] trivial|standard|complex|critical (미지정 시 standard)
+ */
+function contextLimits(taskClass) {
+  const tier = normTier(taskClass);
+  // 명시적 환경변수가 있으면 등급표보다 우선(운영에서 강제 조정 가능).
+  const total = Number(process.env.CONTEXT_TOTAL_MAX_CHARS);
+  const perFileDefault = tier === 'critical' ? 6000 : 4000;
   return {
-    minFiles: n('CONTEXT_MIN_FILES', 2),
-    defaultMaxFiles: n('CONTEXT_DEFAULT_MAX_FILES', 6),
-    hardMaxFiles: n('CONTEXT_HARD_MAX_FILES', 8),
-    perFileMaxChars: n('CONTEXT_PER_FILE_MAX_CHARS', 4000),
-    totalMaxChars: n('CONTEXT_TOTAL_MAX_CHARS', 48000),
+    taskClass: tier,
+    minFiles: numEnv('CONTEXT_MIN_FILES', 2),
+    defaultMaxFiles: numEnv('CONTEXT_DEFAULT_MAX_FILES', 6),
+    hardMaxFiles: numEnv('CONTEXT_HARD_MAX_FILES', 8),
+    perFileMaxChars: numEnv('CONTEXT_PER_FILE_MAX_CHARS', perFileDefault),
+    totalMaxChars: Number.isFinite(total) && total > 0 ? total : CONTEXT_TOTAL_BY_CLASS[tier],
+  };
+}
+
+/**
+ * 재개(fallback) 프롬프트에 실을 컨텍스트 한도(4.5).
+ * 일반: 3개 파일 / 파일당 3,000자 / 전체 8,000자
+ * critical: 4개 파일 / 파일당 4,000자 / 전체 14,000자
+ */
+function resumeContextLimits(taskClass) {
+  const tier = normTier(taskClass);
+  const critical = tier === 'critical';
+  return {
+    taskClass: tier,
+    maxFiles: numEnv('RESUME_CONTEXT_MAX_FILES', critical ? 4 : 3),
+    perFileMaxChars: numEnv('RESUME_CONTEXT_PER_FILE_MAX_CHARS', critical ? 4000 : 3000),
+    totalMaxChars: numEnv('RESUME_CONTEXT_TOTAL_MAX_CHARS', critical ? 14000 : 8000),
+  };
+}
+
+/**
+ * 프롬프트 전체 문자 수 상한(2.1 / 2.2). 토큰 추정은 문자 수 ÷ 4.
+ * @returns {{taskClass, initialMaxChars, resumeMaxChars, resumeMaxRatio,
+ *            initialMaxTokensEstimated, resumeMaxTokensEstimated}}
+ */
+function promptLimits(taskClass) {
+  const tier = normTier(taskClass);
+  const initial = numEnv('PROMPT_INITIAL_MAX_CHARS', PROMPT_INITIAL_BY_CLASS[tier]);
+  const resume = numEnv('PROMPT_RESUME_MAX_CHARS', PROMPT_RESUME_BY_CLASS[tier]);
+  return {
+    taskClass: tier,
+    initialMaxChars: initial,
+    resumeMaxChars: resume,
+    resumeMaxRatio: RESUME_PROMPT_MAX_RATIO,
+    smallPromptExemptChars: SMALL_PROMPT_EXEMPT_CHARS,
+    initialMaxTokensEstimated: Math.ceil(initial / 4),
+    resumeMaxTokensEstimated: Math.ceil(resume / 4),
+  };
+}
+
+/** checkpoint 에 저장할 항목 수 상한(5.6). */
+function checkpointLimits() {
+  return {
+    completed_steps: numEnv('CHECKPOINT_MAX_STEPS', 30),
+    files_read: numEnv('CHECKPOINT_MAX_FILES_READ', 100),
+    files_changed: numEnv('CHECKPOINT_MAX_FILES_CHANGED', 100),
+    commands_run: numEnv('CHECKPOINT_MAX_COMMANDS', 50),
+    test_results: numEnv('CHECKPOINT_MAX_TEST_RESULTS', 30),
   };
 }
 
@@ -149,7 +222,17 @@ module.exports = {
   isMiniMaxToken,
   retryLimits,
   contextLimits,
+  resumeContextLimits,
+  promptLimits,
+  checkpointLimits,
   loadPricing,
   estimateCostUsd,
   PRICING_FILE,
+  CONTEXT_TOTAL_BY_CLASS,
+  PROMPT_INITIAL_BY_CLASS,
+  PROMPT_RESUME_BY_CLASS,
+  RESUME_PROMPT_MAX_RATIO,
+  RESUME_REDUCTION_WARN_RATIO,
+  SMALL_PROMPT_EXEMPT_CHARS,
+  runtimeRoot: (...a) => require('./runtime-paths').runtimeRoot(...a),
 };
