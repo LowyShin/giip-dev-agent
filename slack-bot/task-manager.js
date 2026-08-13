@@ -18,11 +18,15 @@ const ctxBuilder = require('./context-builder');
 const prompts = require('./prompt-templates');
 const checkpoint = require('./retry-checkpoint');
 const costTracker = require('./cost-tracker');
+// giip-1068 비용 최적화 2차
+const progressEvents = require('./progress-events');
+const resumeCtx = require('./resume-context-builder');
 
 const BASE_DIR = path.join(__dirname, '..');
-// giip-1063: 비용 로그(.agent/runtime/cost-usage.jsonl)는 `!cost` 가 읽는 곳과 같아야 하므로
-// config.BASE_DIR(=WORKSPACE_DIR) 기준으로 통일한다.
-const COST_LOG_DIR = config.BASE_DIR || BASE_DIR;
+// giip-1063/1068: 비용 로그와 checkpoint 는 같은 중앙 runtime root 를 쓴다(7).
+// `!cost` 가 읽는 곳과 checkpoint 저장 위치가 갈라지지 않도록 여기 한 곳에서만 정한다.
+const RUNTIME_BASE_DIR = config.BASE_DIR || BASE_DIR;
+const COST_LOG_DIR = RUNTIME_BASE_DIR;
 const TASKS_DIR = path.join(BASE_DIR, '.agent', 'tasks');
 const RESULTS_DIR = path.join(BASE_DIR, '.agent', 'results');
 const TASKLIST_FILE = path.join(__dirname, 'tasklist.json');
@@ -214,7 +218,8 @@ function buildContextCatalog(baseDir = BASE_DIR) {
  */
 function selectContextFiles(requestText, catalog, baseDir = BASE_DIR, opts = {}) {
   if (!catalog || !catalog.length) return [];
-  const limits = modelConfig.contextLimits();
+  // giip-1068 2.3: 컨텍스트 한도는 작업 등급별이다.
+  const limits = modelConfig.contextLimits(opts.taskClass);
   const staticPick = () => ctxBuilder.selectContextFilesStatic(requestText, catalog, limits);
 
   if (opts.staticOnly) return staticPick();
@@ -310,12 +315,13 @@ function analyzeRequest(requestText, taskId, baseDir = BASE_DIR) {
 
   const claims = searchKLayer(requestText);
   const projectName = path.basename(baseDir);
-  const limits = modelConfig.contextLimits();
 
   // 1) 카탈로그(본문 미로딩) + 사전 정적 분류(모델 호출 0회)
   const catalog = buildContextCatalog(baseDir);
   const pre = router.classifyTask(requestText, [], '');
   const fastPath = pre.fastPathEligible;
+  // giip-1068 2.3: 컨텍스트 한도는 등급별. 사전 분류 결과를 그대로 쓴다.
+  const limits = modelConfig.contextLimits(pre.class);
 
   // 2) 컨텍스트 선별 — Fast Path 면 LLM 호출 없이 정적 선별
   let selected = selectContextFiles(requestText, catalog, baseDir, {
@@ -383,6 +389,8 @@ status: pending
 requested_at: ${new Date().toISOString()}
 request: "${requestText.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"
 task_class: ${meta.taskClass || 'standard'}
+risk_class: ${meta.riskClass || 'none'}
+operation: ${meta.operation || 'write'}
 fast_path: ${meta.fastPath ? 'true' : 'false'}
 prompt_version: ${prompts.PROMPT_VERSION}
 ${ctxBuilder.formatContextFilesYaml(norm)}
@@ -409,6 +417,13 @@ function upsertContextFilesFrontmatter(content, norm, meta = {}) {
   // task_class 갱신(없으면 나중에 블록과 함께 삽입)
   if (/^task_class:\s*.+$/m.test(out)) {
     out = out.replace(/^task_class:\s*.+$/m, `task_class: ${meta.taskClass || 'standard'}`);
+  }
+  // giip-1068 10.2: risk_class / operation 도 최신값으로 유지한다(있을 때만 갱신).
+  if (meta.riskClass && /^risk_class:\s*.+$/m.test(out)) {
+    out = out.replace(/^risk_class:\s*.+$/m, `risk_class: ${meta.riskClass}`);
+  }
+  if (meta.operation && /^operation:\s*.+$/m.test(out)) {
+    out = out.replace(/^operation:\s*.+$/m, `operation: ${meta.operation}`);
   }
 
   const blockRe = /^context_files:\s*(?:\[\]|\r?\n(?:[ \t]+.*\r?\n?)*)/m;
@@ -512,6 +527,16 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
   const taskContent = fs.readFileSync(taskFilePath, 'utf8');
   const resultFile = path.join(RESULTS_DIR, `${taskId}.md`);
 
+  // 작업 등급: 분석 단계가 남긴 frontmatter 우선, 없으면(구형 태스크) 본문으로 정적 분류.
+  // giip-1068 2.3: 컨텍스트 한도가 등급별이므로 컨텍스트를 읽기 전에 먼저 등급을 정한다.
+  const fmClassMatch = taskContent.match(/^task_class:\s*(\w+)\s*$/m);
+  const fmClass = fmClassMatch && router.ORDER.includes(fmClassMatch[1]) ? fmClassMatch[1] : null;
+  const classification = fmClass
+    ? { class: fmClass, confidence: 1, reasons: ['분석 단계에서 결정된 등급 재사용'] }
+    : router.classifyTask(taskContent, [], taskContent);
+  const taskClass = classification.class;
+  const fastPath = /^fast_path:\s*true\s*$/m.test(taskContent);
+
   // ── 선택된 컨텍스트만 재로딩 (전체 roles 로딩 제거, 3.1) ──────────────────
   // 신규 태스크: frontmatter 의 context_files, 구형 태스크: 주석 목록(하위 호환).
   // 둘 다 없거나 읽기에 실패하면 "최소" 기본 컨텍스트만 쓴다 — 전체 roles 로 되돌아가지 않는다.
@@ -521,7 +546,7 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
   const ctxRead = ctxBuilder.readSelectedContext(selected, baseDir, {
     workspaceDir: BASE_DIR,
     queryText: taskContent,
-    limits: modelConfig.contextLimits(),
+    limits: modelConfig.contextLimits(taskClass),
   });
   if (!ctxRead.filesRead.length && contextSource === 'task-metadata') {
     // 선택 목록이 손상돼 하나도 못 읽은 경우에만 최소 기본으로 대체
@@ -541,39 +566,82 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
   const currentBranch = (ctx && ctx.branch) || getCurrentBranch(baseDir);
   const baseBranch = (ctx && ctx.base) || getBaseBranch(baseDir);
 
-  // 작업 등급: 분석 단계가 남긴 frontmatter 우선, 없으면(구형 태스크) 본문으로 정적 분류.
-  const fmClassMatch = taskContent.match(/^task_class:\s*(\w+)\s*$/m);
-  const fmClass = fmClassMatch && router.ORDER.includes(fmClassMatch[1]) ? fmClassMatch[1] : null;
-  const classification = fmClass
-    ? { class: fmClass, confidence: 1, reasons: ['분석 단계에서 결정된 등급 재사용'] }
-    : router.classifyTask(taskContent, ctxRead.filesRead, taskContent);
-  const taskClass = classification.class;
-  const fastPath = /^fast_path:\s*true\s*$/m.test(taskContent);
-  console.log(`[TaskManager] task ${taskId}: class=${taskClass}${fastPath ? ' (fast path)' : ''} — ${classification.reasons.join(' / ')}`);
+  console.log(`[TaskManager] task ${taskId}: class=${taskClass}${fastPath ? ' (fast path)' : ''}`
+    + `${classification.operation ? ` op=${classification.operation} risk=${classification.risk_class}` : ''}`
+    + ` — ${classification.reasons.join(' / ')}`);
 
   // 進捗コメント・プロトコル(PROTOCOL_PROGRESS_COMMENT.md) は프롬프트 고정부에 있고,
   // 여기서는 issue 번호와 커맨드만 동적 상태로 넘긴다(고정 prefix 안정화).
   const addCommentScript = path.join(BASE_DIR, '..', 'giipprj', 'giipdb', 'mgmt', 'addIssueComment.ps1');
 
-  const buildPrompt = (attemptNo, resumeInstruction) => prompts.buildExecutionPrompt({
-    fastPath,
-    contextText: ctxRead.context,
-    contextFiles: ctxRead.filesRead.map(f => ({ path: f.path, reason: f.reason })),
+  // giip-1068 5.5: 모델이 진행 이벤트를 남길 전용 CLI 명령(프롬프트 동적 상태 절에 싣는다).
+  const progressEventScript = path.join(__dirname, 'tools', 'progress-event.js');
+  const progressEventCommand =
+    `node "${progressEventScript}" --task ${taskId} --attempt <n> --type <type>`
+    + ` --step <step-id> --path <상대경로> --summary "<한 줄 요약>" --base-dir "${RUNTIME_BASE_DIR}"`;
+
+  const commonPromptFields = {
     projectName: path.basename(baseDir),
     baseDir,
     baseBranch,
     langName: config.resolveLangNameForProject(path.basename(baseDir)),
-    taskContent,
-    kLayerClaims: claims,
     taskId,
     taskClass,
     branch: currentBranch,
-    attempt: attemptNo,
     resultFile,
     isn,
     addCommentScript: isn ? addCommentScript : null,
-    resumeInstruction,
+    progressEventCommand,
+  };
+
+  // 4.2: 최초 실행과 재개를 서로 다른 함수로 만든다.
+  const buildInitialPrompt = (attemptNo) => prompts.buildInitialExecutionPrompt({
+    ...commonPromptFields,
+    fastPath,
+    contextText: ctxRead.context,
+    contextFiles: ctxRead.filesRead.map(f => ({ path: f.path, reason: f.reason })),
+    taskContent,
+    kLayerClaims: claims,
+    attempt: attemptNo,
   });
+
+  // 4.4/4.5: 재개 프롬프트에는 태스크 "요약" + 진행 상태 + 최대 3개(critical 4개) 재개 컨텍스트만.
+  const taskSummary = prompts.summarizeTaskSpec(taskContent);
+  const buildResumePrompt = (attemptNo, cp, initialChars) => {
+    const failedStep = (cp.pending_steps || [])[0] || (cp.blocked || [])[0] || cp.error_summary || '';
+    const selected = resumeCtx.selectResumeContext({
+      initialSelection: ctxRead.filesRead.map(f => ({ path: f.path, reason: f.reason })),
+      failedStep,
+      pendingSteps: cp.pending_steps || [],
+      changedFiles: cp.files_changed || [],
+      errorSummary: cp.error_summary || '',
+      taskClass,
+    });
+    const rc = resumeCtx.readResumeContext(selected, baseDir, {
+      workspaceDir: BASE_DIR,
+      queryText: `${failedStep} ${(cp.files_changed || []).join(' ')}`,
+      taskClass,
+    });
+    return prompts.buildResumeExecutionPrompt({
+      ...commonPromptFields,
+      attempt: attemptNo,
+      taskSummary,
+      taskFilePath: path.relative(BASE_DIR, taskFilePath).replace(/\\/g, '/'),
+      completedSteps: cp.completed_steps || [],
+      pendingSteps: cp.pending_steps || [],
+      filesRead: cp.files_read || [],
+      filesChanged: cp.files_changed || [],
+      diffSummary: cp.diff_stat || '',
+      commandsRun: cp.commands_run || [],
+      testResults: cp.test_results || [],
+      decisions: cp.decisions || [],
+      blocked: cp.blocked || [],
+      errorSummary: cp.error_summary || '',
+      resumeContextText: rc.context,
+      resumeContextFiles: rc.filesRead.map(f => ({ path: f.path, reason: f.reason })),
+      initialPromptChars: initialChars,
+    });
+  };
 
   // 実行サブエージェントが roles/rules/skills/workflows を参照できるよう .agent を許可
   // （baseDir に .agent が無ければ BASE_DIR/.agent にフォールバック — index.js の getAgentDir と同じ規則）
@@ -591,8 +659,14 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
   let mmExhausted = false;
   let attemptNo = 0;
   const retryState = { totalAttempts: 0, providerAttempts: {} };
+  // 60% 규칙(2.2) 판정 기준이 되는 최초 프롬프트 길이. 첫 시도에서 채워진다.
+  let initialPromptChars = 0;
 
-  function attempt(resumeInstruction = null, fallbackFrom = null) {
+  /**
+   * @param {object|null} resumeCp 재개에 쓸 checkpoint(null 이면 최초 프롬프트 재사용)
+   * @param {string|null} fallbackFrom
+   */
+  function attempt(resumeCp = null, fallbackFrom = null) {
     const mmAvailable = mmExhausted ? null : minimax.resolve();
     const route = router.selectModel(taskClass, 'execute',
       { minimax: !!mmAvailable, claude: accounts.count() > 0 });
@@ -637,9 +711,24 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
       ? [...args, '--model', modelName]
       : [...args, '--model', modelName];
 
-    const executionPrompt = buildPrompt(attemptNo, resumeInstruction);
-    checkpoint.beginAttempt(baseDir, taskId, {
-      attempt: attemptNo, provider, model: modelName, taskClass,
+    // 4.2/4.6: 실제 작업 흔적이 있는 재시도만 재개 프롬프트를 쓴다. 그 외에는 최초 프롬프트 재사용.
+    let executionPrompt;
+    let promptType;
+    if (resumeCp) {
+      executionPrompt = buildResumePrompt(attemptNo, resumeCp, initialPromptChars);
+      promptType = 'resume';
+      const ratio = initialPromptChars
+        ? Math.round((1 - executionPrompt.length / initialPromptChars) * 1000) / 10 : null;
+      console.log(`[TaskManager] task ${taskId}: 재개 프롬프트 사용 (${executionPrompt.length}자`
+        + `${initialPromptChars ? ` / 최초 ${initialPromptChars}자, -${ratio}%` : ''})`);
+    } else {
+      executionPrompt = buildInitialPrompt(attemptNo);
+      promptType = 'initial';
+      if (!initialPromptChars) initialPromptChars = executionPrompt.length;
+    }
+
+    checkpoint.beginAttempt(RUNTIME_BASE_DIR, taskId, {
+      attempt: attemptNo, provider, model: modelName, taskClass, workDir: baseDir,
     });
 
     const startedAt = Date.now();
@@ -659,6 +748,10 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
     proc.on('close', (code) => {
       const combinedOut = `${stdout}\n${stderr}`;
       const usage = costTracker.parseUsageFromOutput(combinedOut);
+      // 6.2: 태스크/결과/런타임 파일을 제외한 "실제" 소스 변경만 센다.
+      let srcChanged = { sourceFiles: [], metadataFiles: [], reportFiles: [] };
+      try { srcChanged = checkpoint.changedSourceFiles(baseDir, taskId); } catch {}
+      const eventCount = progressEvents.readProgressEvents(RUNTIME_BASE_DIR, taskId).length;
       try {
         costTracker.record(COST_LOG_DIR, {
           task_id: taskId,
@@ -680,17 +773,33 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
           prompt_version: prompts.PROMPT_VERSION,
           context_selection: ctxRead.filesRead.map(f => ({ path: f.path, reason: f.reason })),
           // checkpoint 로 이어서 재개한 시도인지 기록(재시도가 처음부터 다시 한 것인지 구분).
-          resumed: !!resumeInstruction,
+          resumed: promptType === 'resume',
+          // giip-1068 13: 재개 프롬프트 축약 계측
+          prompt_type: promptType,
+          initial_prompt_chars: initialPromptChars || null,
+          current_prompt_chars: executionPrompt.length,
+          actual_source_files_changed: srcChanged.sourceFiles.length,
+          metadata_files_changed: srcChanged.metadataFiles.length + srcChanged.reportFiles.length,
+          checkpoint_used: promptType === 'resume',
+          progress_event_count: eventCount,
+          saving_is_estimated: !usage,
           ...(usage || {}),
         });
       } catch { /* 계측 실패가 태스크를 막지 않는다 */ }
 
       // ── 실패 시: checkpoint 저장 후 "이어서" 재개 ─────────────────────────
       if (code !== 0) {
-        const cp = checkpoint.recordFailure(baseDir, taskId, {
-          attempt: attemptNo, provider, model: modelName, output: combinedOut, cwd: baseDir,
+        const cp = checkpoint.recordFailure(RUNTIME_BASE_DIR, taskId, {
+          attempt: attemptNo, provider, model: modelName, output: combinedOut,
+          cwd: baseDir, taskClass,
         });
-        const nextResume = cp.resume_instruction || null;
+        // 4.6/6.5: 실제 작업이 있으면 반드시 재개 프롬프트, 없으면 최초 프롬프트 재사용.
+        const decision = checkpoint.shouldResume({ exitCode: code, checkpoint: cp, checkpointSaved: true });
+        const nextResume = decision.resume ? cp : null;
+        console.log(`[TaskManager] task ${taskId}: 재개 판정 — ${decision.reason}`);
+        if (cp.changed_file_anomalies && cp.changed_file_anomalies.length) {
+          console.warn(`[TaskManager] task ${taskId}: 이상 변경 감지 — ${cp.changed_file_anomalies.join(' / ')}`);
+        }
 
         // MiniMax(1순위) 실패 → 이번 태스크는 더 이상 MiniMax를 시도하지 않고 Claude 풀로 전환.
         if (provider === 'minimax') {
@@ -723,7 +832,7 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
       }
 
       if (code === 0) {
-        checkpoint.recordSuccess(baseDir, taskId, { attempt: attemptNo, provider, model: modelName, cwd: baseDir });
+        checkpoint.recordSuccess(RUNTIME_BASE_DIR, taskId, { attempt: attemptNo, provider, model: modelName, cwd: baseDir });
         onComplete(resultFile);
       } else {
         onError(new Error(`claude exit ${code}: ${stderr.slice(0, 200)}`), resultFile);
@@ -735,11 +844,16 @@ function startExecution(taskId, taskFilePath, { onComplete, onError, isn = null 
   }
 
   // 이전 실행이 중단된 채 남아 있으면(재실행/이어하기) 그 checkpoint 로 시작한다.
-  const prior = checkpoint.load(baseDir, taskId);
-  const priorResume = prior && !prior.finished_at ? checkpoint.buildResumeInstruction(prior) : null;
-  if (priorResume) console.log(`[TaskManager] task ${taskId}: 이전 checkpoint 발견 → 완료된 단계부터 이어서 실행`);
+  // 단, 최초 프롬프트 길이를 모르므로 여기서는 등급별 재개 상한만 적용된다(60% 규칙은 attempt 내부).
+  const prior = checkpoint.load(RUNTIME_BASE_DIR, taskId);
+  const priorHasWork = prior && !prior.finished_at && checkpoint.hasRealWork(prior);
+  if (priorHasWork) {
+    console.log(`[TaskManager] task ${taskId}: 이전 checkpoint 발견 → 완료된 단계부터 이어서 실행`);
+    // 60% 판정 기준으로 쓸 "최초 프롬프트 길이"를 실제로 조립해 계산한다(전송하지는 않는다).
+    try { initialPromptChars = buildInitialPrompt(1).length; } catch {}
+  }
 
-  return attempt(priorResume);
+  return attempt(priorHasWork ? prior : null);
 }
 
 // ── 작업 완료: 결과를 태스크 파일에 추가 후 done/ 폴더로 이동 ─────────────────

@@ -88,13 +88,19 @@ async function reAuthClaude(account = null) {
 async function callClaude(prompt, workDir = BASE_DIR, opts = {}) {
   const agentDir = getAgentDir(workDir);
   // 3.8 배치: 한 메시지 안의 독립 read/search/status 요청만 묶는다(대기시켜 강제 배치하지 않음).
-  let batch = { batchable: false, batch_size: 1, model_calls_saved: 0 };
+  let batch = {
+    batchable: false, batch_size: 1,
+    actual_model_calls_saved: 0, hypothetical_separate_calls_avoided: 0, saving_is_estimated: false,
+  };
   if (opts.userText) {
     try {
       batch = batchPlanner.planBatch(opts.userText);
       if (batch.batchable && batch.instruction) {
         prompt = `${prompt}\n\n${batch.instruction}`;
-        console.log(`[Bot] 배치 처리: ${batch.batch_size}개 독립 조회 → 모델 호출 ${batch.model_calls_saved}회 절약`);
+        // giip-1068 8.1: 실제 절감(0)과 가정 절감을 구분해 로그한다. 가상 수치를 절감으로 부르지 않는다.
+        console.log(`[Bot] 배치 처리: ${batch.batch_size}개 독립 조회를 한 응답으로 처리`
+          + ` (실제 절감 모델 호출 ${batch.actual_model_calls_saved}회,`
+          + ` 개별 호출 가정 시 피한 호출 ${batch.hypothetical_separate_calls_avoided}회 — 가정값)`);
       }
     } catch { /* 배치 판정 실패는 무시 */ }
   }
@@ -106,7 +112,9 @@ async function callClaude(prompt, workDir = BASE_DIR, opts = {}) {
         task_class: 'standard',
         input_chars: prompt.length,
         batch_size: batch.batch_size,
-        model_calls_saved: batch.model_calls_saved,
+        actual_model_calls_saved: batch.actual_model_calls_saved,
+        hypothetical_separate_calls_avoided: batch.hypothetical_separate_calls_avoided,
+        saving_is_estimated: batch.saving_is_estimated,
         ...extra,
       });
     } catch { /* 계측 실패가 응답을 막지 않는다 */ }

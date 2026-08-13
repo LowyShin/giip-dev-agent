@@ -59,15 +59,33 @@ function splitItems(text) {
 /**
  * 한 메시지 안의 독립 조회를 묶을 수 있는지 판정한다.
  *
+ * giip-1068 (8): 절감 수치를 "실제"와 "가정"으로 분리한다.
+ *   기존 구조도 한 Slack 메시지를 한 번의 모델 호출로 처리했다. 따라서 배치 지시를 붙였다고 해서
+ *   모델 호출 수가 줄어드는 것은 아니다(actual_model_calls_saved = 0).
+ *   `hypothetical_separate_calls_avoided` 는 "항목마다 따로 물었다면 필요했을 호출 수 − 1" 이라는
+ *   가정값이며, 기본 `!cost` 보고서에 실제 절감으로 합산하지 않는다.
+ *
  * @returns {{
- *   batchable: boolean, batch_size: number, model_calls_saved: number,
+ *   batchable: boolean, batch_size: number,
+ *   hypothetical_separate_calls_avoided: number,
+ *   actual_model_calls_before: number, actual_model_calls_after: number,
+ *   actual_model_calls_saved: number, saving_is_estimated: boolean,
  *   items: string[], reason: string, instruction: string|null
  * }}
  */
 function planBatch(text) {
   const items = splitItems(text);
   const none = (reason) => ({
-    batchable: false, batch_size: items.length || 1, model_calls_saved: 0, items, reason, instruction: null,
+    batchable: false,
+    batch_size: items.length || 1,
+    hypothetical_separate_calls_avoided: 0,
+    actual_model_calls_before: 1,
+    actual_model_calls_after: 1,
+    actual_model_calls_saved: 0,
+    saving_is_estimated: false,
+    items,
+    reason,
+    instruction: null,
   });
 
   if (items.length < 2) return none('단일 요청');
@@ -85,10 +103,15 @@ function planBatch(text) {
   return {
     batchable: true,
     batch_size: items.length,
-    // 항목마다 따로 물었다면 items.length 회 호출이 필요했을 것 → 1회로 처리하므로 n-1 절약
-    model_calls_saved: items.length - 1,
+    // 가정값: 항목마다 따로 물었다면 items.length 회가 필요했을 것 → n-1. 실제 절감이 아니다.
+    hypothetical_separate_calls_avoided: items.length - 1,
+    // 실측: 배치 지시 유무와 무관하게 한 메시지는 예전에도 지금도 모델 호출 1회다.
+    actual_model_calls_before: 1,
+    actual_model_calls_after: 1,
+    actual_model_calls_saved: 0,
+    saving_is_estimated: false,   // 실제 절감값(0)은 추정이 아니라 실측 구조에서 나온 값
     items,
-    reason: '한 메시지 안의 독립 read/search/status 요청',
+    reason: '한 메시지 안의 독립 read/search/status 요청 — 항목별 되묻기(추가 왕복)를 막는 효과는 있으나 모델 호출 수 절감은 0',
     instruction: buildBatchInstruction(items),
   };
 }

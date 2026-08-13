@@ -14,13 +14,15 @@ const fs = require('fs');
 const path = require('path');
 
 const modelConfig = require('./model-config');
+const runtimePaths = require('./runtime-paths');
 const { maskDeep } = require('./secret-mask');
 
 const RUNTIME_SUBDIR = path.join('.agent', 'runtime');
 const LOG_BASENAME = 'cost-usage.jsonl';
 
+/** giip-1068 7: checkpoint 와 같은 중앙 runtime root 를 쓴다. */
 function logPath(baseDir) {
-  return path.join(baseDir, RUNTIME_SUBDIR, LOG_BASENAME);
+  return runtimePaths.costLogPath(baseDir);
 }
 
 /**
@@ -74,6 +76,26 @@ function record(baseDir, entry = {}) {
 
   const priced = modelConfig.estimateCostUsd(entry.model, inputTokens, outputTokens);
 
+  // ── giip-1068 13: 프롬프트 축약 계측 ────────────────────────────────────────
+  const initialChars = Number(entry.initial_prompt_chars);
+  const currentChars = Number.isFinite(Number(entry.current_prompt_chars))
+    ? Number(entry.current_prompt_chars)
+    : Number(entry.input_chars);
+  let reductionChars = null;
+  let reductionRatio = null;
+  if (Number.isFinite(initialChars) && initialChars > 0 && Number.isFinite(currentChars)) {
+    reductionChars = initialChars - currentChars;
+    reductionRatio = Math.round((reductionChars / initialChars) * 1e4) / 1e4;
+  }
+  const promptType = entry.prompt_type === 'resume' ? 'resume'
+    : (entry.prompt_type === 'initial' ? 'initial' : null);
+  if (promptType === 'resume' && reductionRatio !== null
+      && reductionRatio < modelConfig.RESUME_REDUCTION_WARN_RATIO) {
+    console.warn('[CostOptimizationWarning]\nResume prompt reduced input by less than 40%.'
+      + ` (task=${entry.task_id || '?'}, initial=${initialChars}자, current=${currentChars}자,`
+      + ` ratio=${reductionRatio})`);
+  }
+
   const row = maskDeep({
     timestamp: new Date().toISOString(),
     task_id: entry.task_id || null,
@@ -98,15 +120,37 @@ function record(baseDir, entry = {}) {
     prompt_version: entry.prompt_version || null,
     fast_path: entry.fast_path === undefined ? null : !!entry.fast_path,
     batch_size: entry.batch_size === undefined ? null : Number(entry.batch_size),
-    model_calls_saved: entry.model_calls_saved === undefined ? null : Number(entry.model_calls_saved),
+    // ── giip-1068 8: 가상 절감과 실제 절감을 분리한다 ─────────────────────────
+    // 기존 `model_calls_saved` 는 "항목마다 따로 호출했다면 피했을 호출 수"라는 가정값이었다.
+    // 기존 구조도 한 메시지를 한 번의 모델 호출로 처리했으므로 실제 절감은 0이다.
+    actual_model_calls_saved: entry.actual_model_calls_saved === undefined
+      ? null : Number(entry.actual_model_calls_saved),
+    hypothetical_separate_calls_avoided: entry.hypothetical_separate_calls_avoided === undefined
+      ? null : Number(entry.hypothetical_separate_calls_avoided),
+    saving_is_estimated: entry.saving_is_estimated === undefined ? null : !!entry.saving_is_estimated,
     context_selection: entry.context_selection || null,   // [{path, reason}] — 선택 이유(3.7-7)
     // checkpoint 로 "이어서" 재개한 시도인지. false 인 재시도는 작업을 처음부터 다시 한 것.
     resumed: entry.resumed === undefined ? null : !!entry.resumed,
+    // ── giip-1068 13: 재개 프롬프트 축약 계측 ──────────────────────────────────
+    prompt_type: promptType,
+    initial_prompt_chars: Number.isFinite(initialChars) ? initialChars : null,
+    current_prompt_chars: Number.isFinite(currentChars) ? currentChars : null,
+    prompt_reduction_chars: reductionChars,
+    prompt_reduction_ratio: reductionRatio,
+    actual_source_files_changed: entry.actual_source_files_changed === undefined
+      ? null : Number(entry.actual_source_files_changed),
+    metadata_files_changed: entry.metadata_files_changed === undefined
+      ? null : Number(entry.metadata_files_changed),
+    checkpoint_used: entry.checkpoint_used === undefined ? null : !!entry.checkpoint_used,
+    progress_event_count: entry.progress_event_count === undefined
+      ? null : Number(entry.progress_event_count),
   });
 
   try {
-    fs.mkdirSync(path.join(baseDir, RUNTIME_SUBDIR), { recursive: true });
-    fs.appendFileSync(logPath(baseDir), `${JSON.stringify(row)}\n`, 'utf8');
+    // giip-1068 7: 디렉터리도 runtime root 기준으로 만든다(FDE_RUNTIME_DIR 존중).
+    const p = logPath(baseDir);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.appendFileSync(p, `${JSON.stringify(row)}\n`, 'utf8');
   } catch (e) {
     console.error('[cost-tracker] 기록 실패:', e.message);
     return null;
@@ -142,8 +186,11 @@ function summarize(baseDir, opts = {}) {
   const byModel = {};
   const byClass = {};
   let inputTokens = 0, outputTokens = 0, cost = 0, costKnown = 0;
-  let fallbacks = 0, retryDuplicateTokens = 0, fastPathCalls = 0, batchSaved = 0;
+  let fallbacks = 0, retryDuplicateTokens = 0, fastPathCalls = 0;
+  let batchActualSaved = 0, batchHypothetical = 0, batchMessages = 0;
   let retries = 0, resumedRetries = 0;
+  let resumePrompts = 0, resumeReductionSum = 0, resumeReductionCount = 0;
+  let resumeUnderTarget = 0;
   const fastPathTasks = new Set();
   let estimatedRows = 0;
 
@@ -160,7 +207,27 @@ function summarize(baseDir, opts = {}) {
       if (r.resumed) resumedRetries += 1;
     }
     if (r.fast_path) { fastPathCalls += 1; if (r.task_id) fastPathTasks.add(r.task_id); }
-    if (Number(r.model_calls_saved)) batchSaved += Number(r.model_calls_saved);
+
+    // 배치 수치(8.2). 구 로그의 `model_calls_saved` 는 가정값이었으므로 가정 쪽에 합산한다.
+    if (Number(r.batch_size) > 1) batchMessages += 1;
+    if (Number.isFinite(Number(r.actual_model_calls_saved))) {
+      batchActualSaved += Number(r.actual_model_calls_saved) || 0;
+    }
+    if (Number.isFinite(Number(r.hypothetical_separate_calls_avoided))) {
+      batchHypothetical += Number(r.hypothetical_separate_calls_avoided) || 0;
+    } else if (Number(r.model_calls_saved)) {
+      batchHypothetical += Number(r.model_calls_saved);   // 구 로그 하위 호환(= 가정값)
+    }
+
+    // 재개 프롬프트 축약(13)
+    if (r.prompt_type === 'resume') {
+      resumePrompts += 1;
+      if (typeof r.prompt_reduction_ratio === 'number') {
+        resumeReductionSum += r.prompt_reduction_ratio;
+        resumeReductionCount += 1;
+        if (r.prompt_reduction_ratio < modelConfig.RESUME_REDUCTION_WARN_RATIO) resumeUnderTarget += 1;
+      }
+    }
 
     const mk = `${r.provider || '?'}/${r.model || '?'}`;
     byModel[mk] = byModel[mk] || { calls: 0, input_tokens: 0, output_tokens: 0, cost: null };
@@ -210,16 +277,36 @@ function summarize(baseDir, opts = {}) {
     resumed_retries: resumedRetries,
     fast_path_calls: fastPathCalls,
     fast_path_tasks: fastPathTasks.size,
-    // 추정치: Fast Path 태스크 1건당 컨텍스트 선별 호출 1회 + 계획 생성 호출 1회를 생략한다.
+    // 8.4 Fast Path 절감은 "변경 전 로그"가 없으면 실측이 아니라 추정이다. 반드시 estimated 로 표시.
+    fast_path: {
+      actual_calls: fastPathCalls,
+      baseline_expected_calls: fastPathTasks.size * 3,   // 선별 1 + 계획 1 + 실행 1 (변경 전 가정)
+      estimated_calls_saved: fastPathTasks.size * 2,
+      saving_is_estimated: true,
+    },
+    // 하위 호환(구 필드명) — 값은 위 estimated 와 동일하다.
     fast_path_model_calls_saved_estimated: fastPathTasks.size * 2,
-    batch_model_calls_saved: batchSaved,
+    // 8.2/8.3: 실제 절감과 가정 절감을 절대 합치지 않는다.
+    batch_messages: batchMessages,
+    batch_actual_model_calls_saved: batchActualSaved,
+    batch_hypothetical_separate_calls_avoided: batchHypothetical,
+    // 13: 재개 프롬프트 축약
+    resume_prompts: resumePrompts,
+    resume_avg_reduction_ratio: resumeReductionCount
+      ? Math.round((resumeReductionSum / resumeReductionCount) * 1e4) / 1e4 : null,
+    resume_under_target: resumeUnderTarget,
     by_model: byModel,
     by_class: byClassOut,
   };
 }
 
-/** Slack/CLI 공용 텍스트 리포트. */
-function formatSummary(sum, title = '비용 요약') {
+/**
+ * Slack/CLI 공용 텍스트 리포트.
+ *
+ * giip-1068 8.3: 기본 보고서에는 "실제 절감"만 싣는다. 가상(가정) 절감값은 합산하지 않고
+ * `detailed:true`(= `!cost detail`)일 때만, 반드시 "가정값"이라고 명시해 보여준다.
+ */
+function formatSummary(sum, title = '비용 요약', detailed = false) {
   if (!sum.rows) return `${title}: 기록된 모델 호출이 없습니다 (.agent/runtime/${LOG_BASENAME}).`;
   const lines = [];
   lines.push(`*${title}*`);
@@ -231,8 +318,15 @@ function formatSummary(sum, title = '비용 요약') {
     : `• 추정 비용: $${sum.estimated_cost_usd} (단가 설정된 ${sum.priced_calls}건 기준)`);
   lines.push(`• fallback 횟수: ${sum.fallbacks}`);
   lines.push(`• 재시도 ${sum.retries}회 (그중 checkpoint 로 이어서 재개 ${sum.resumed_retries}회), 재전송된 입력 토큰: ${sum.retry_duplicate_input_tokens.toLocaleString()}`);
-  lines.push(`• Fast Path 태스크 ${sum.fast_path_tasks}건 → 생략된 모델 호출 ${sum.fast_path_model_calls_saved_estimated}회(추정: 선별 1 + 계획 1)`);
-  lines.push(`• 배치로 절약한 모델 호출: ${sum.batch_model_calls_saved}회`);
+  if (sum.resume_prompts) {
+    lines.push(`• 재개 프롬프트 ${sum.resume_prompts}회, 평균 입력 감소율 ${sum.resume_avg_reduction_ratio === null ? 'NOT_MEASURED' : `${Math.round(sum.resume_avg_reduction_ratio * 1000) / 10}%`}${sum.resume_under_target ? ` (40% 미만 ${sum.resume_under_target}회 — 경고)` : ''}`);
+  }
+  lines.push(`• Fast Path 태스크 ${sum.fast_path_tasks}건 → 생략된 모델 호출 ${sum.fast_path.estimated_calls_saved}회 (ESTIMATED — 변경 전 실측 로그 없음)`);
+  lines.push(`• 배치 처리 메시지: ${sum.batch_messages}건`);
+  lines.push(`• 실제 절감 호출: ${sum.batch_actual_model_calls_saved}회`);
+  if (detailed) {
+    lines.push(`• (가정값) 개별 호출로 처리했다고 가정했을 때 피한 호출: ${sum.batch_hypothetical_separate_calls_avoided}회 — 실제 절감에 합산하지 않음`);
+  }
   lines.push('');
   lines.push('*모델별*');
   for (const [k, v] of Object.entries(sum.by_model)) {
@@ -248,25 +342,33 @@ function formatSummary(sum, title = '비용 요약') {
 
 /** `!cost ...` 인자를 해석해 리포트 문자열을 만든다. Slack/CLI 공용. */
 function report(baseDir, arg = '') {
-  const a = String(arg || '').trim().toLowerCase();
+  // `!cost detail` / `!cost today detail` — 가정 절감값은 상세 보고서에만 나온다(8.3).
+  const DETAIL_RE = /(^|\s)(detail|details|상세)(\s|$)/i;
+  const rawArg = String(arg || '').trim();
+  const detailed = DETAIL_RE.test(rawArg);
+  const cleaned = (detailed ? rawArg.replace(DETAIL_RE, ' ') : rawArg).trim();
+  const a = cleaned.toLowerCase();
+
   if (a === 'today') {
     const d = new Date(); d.setHours(0, 0, 0, 0);
-    return formatSummary(summarize(baseDir, { since: d }), '비용 요약 (오늘)');
+    return formatSummary(summarize(baseDir, { since: d }), '비용 요약 (오늘)', detailed);
   }
   if (a.startsWith('task ')) {
-    const id = String(arg).trim().slice(5).trim();
-    return formatSummary(summarize(baseDir, { taskId: id }), `비용 요약 (task ${id})`);
+    const id = cleaned.slice(5).trim();   // 대소문자 보존
+    return formatSummary(summarize(baseDir, { taskId: id }), `비용 요약 (task ${id})`, detailed);
   }
-  if (a === 'models') {
-    const sum = summarize(baseDir);
-    if (!sum.rows) return '기록된 모델 호출이 없습니다.';
-    const lines = ['*모델별 사용량*'];
-    for (const [k, v] of Object.entries(sum.by_model)) {
-      lines.push(`• ${k}: ${v.calls}회, in ${v.input_tokens.toLocaleString()} / out ${v.output_tokens.toLocaleString()}${v.cost === null ? ' (단가 미설정 — 비용 측정 불가)' : `, $${Math.round(v.cost * 1e6) / 1e6}`}`);
-    }
-    return lines.join('\n');
+  if (a === 'models') return reportModels(baseDir);
+  return formatSummary(summarize(baseDir), '비용 요약 (전체)', detailed);
+}
+
+function reportModels(baseDir) {
+  const sum = summarize(baseDir);
+  if (!sum.rows) return '기록된 모델 호출이 없습니다.';
+  const lines = ['*모델별 사용량*'];
+  for (const [k, v] of Object.entries(sum.by_model)) {
+    lines.push(`• ${k}: ${v.calls}회, in ${v.input_tokens.toLocaleString()} / out ${v.output_tokens.toLocaleString()}${v.cost === null ? ' (단가 미설정 — 비용 측정 불가)' : `, $${Math.round(v.cost * 1e6) / 1e6}`}`);
   }
-  return formatSummary(summarize(baseDir), '비용 요약 (전체)');
+  return lines.join('\n');
 }
 
 module.exports = {
@@ -280,4 +382,5 @@ module.exports = {
   summarize,
   formatSummary,
   report,
+  reportModels,
 };
