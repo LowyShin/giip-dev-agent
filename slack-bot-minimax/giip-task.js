@@ -4,8 +4,47 @@
  * 설계: docs/DESIGN_slackbot_giip_issue_integration.md §4.
  * 모든 함수는 절대 throw 하지 않는다(봇 무중단). 실패는 로그 + null/no-op.
  */
+const os = require('os');
 const accounts = require('./giip-accounts');
 const giip = require('./giip-api');
+
+/**
+ * 이 배포가 giip 이슈 코멘트에 남길 행위자 이름표. 여러 사용자가 배포해 쓰는 범용 코드이므로
+ * 하드코딩하지 않고 env 로 설정한다(예: 이 PC 배포는 GIIP_ACTOR_TAG=lowyclaude).
+ * 미설정 시 host 기준 합리적 기본값으로 폴백 — 최소한 "어느 머신의 봇인지"는 항상 남는다.
+ */
+function actorTag() {
+  return process.env.GIIP_ACTOR_TAG || `slack-bot@${os.hostname()}`;
+}
+
+/**
+ * 상태전이 코멘트에 행위자(actor)·시각(when)·사유(why) 헤더를 항상 붙인다.
+ * giip #1146~1151/#1155 인시던트(무인 세션이 코멘트 없이 IN_PROGRESS 전이) 재발방지 —
+ * caller 가 comment 를 안 줘도(null) 이 헤더만은 구조적으로 남긴다.
+ */
+function buildTransitionComment(isn, status, comment) {
+  const actor = actorTag();
+  const when = new Date().toISOString();
+  const why = comment ? String(comment) : '(자동 전이, 상세 사유 미기재)';
+  return [
+    `## [${actor}] ISN ${isn} 상태전이: → ${status}`,
+    `**행위자(Actor)**: ${actor}`,
+    `**시각(When)**: ${when}`,
+    `**사유(Why)**: ${why}`,
+  ].join('\n');
+}
+
+/** 상태전이가 없는 note 코멘트에도 일관되게 행위자/시각 헤더를 붙인다. */
+function buildNoteComment(comment) {
+  const actor = actorTag();
+  const when = new Date().toISOString();
+  return [
+    `**행위자(Actor)**: ${actor}`,
+    `**시각(When)**: ${when}`,
+    '',
+    String(comment),
+  ].join('\n');
+}
 
 /** 타임아웃/네트워크 등 일시적 오류인지 판단(1회 재시도 대상). 권한/데이터 오류는 재시도해도 무의미하므로 제외. */
 function isRetryableIssueError(e) {
@@ -54,13 +93,23 @@ async function maybeCreateIssue(channelId, title, content, csn = null) {
   return { isn: null, error: lastErr.message };
 }
 
-/** 완료/에러 시: 코멘트 + 상태전이(best-effort, 실패해도 무시). */
+/**
+ * 완료/에러/착수 시: 코멘트 + 상태전이(best-effort, 실패해도 무시).
+ * 상태 전이(status 지정)는 comment 인자 유무와 무관하게 항상 행위자/시각/사유 헤더가 붙은
+ * 코멘트를 남긴다 — "comment=null 이면 코멘트 자체를 스킵"하던 구버전 버그(giip #1155)가
+ * 재발하지 않도록 여기서 구조적으로 막는다. caller 가 준 comment 는 "사유"에 그대로 보존된다.
+ */
 async function maybeFinish(channelId, isn, status, comment) {
   if (!isn) return;
   const acct = accounts.resolve(channelId);
   if (!acct) return;
-  try { if (comment) await giip.issueComment(acct, isn, comment); }
-  catch (e) { console.error('[giip-task] comment 실패:', e.message); }
+  const wrapped = status
+    ? buildTransitionComment(isn, status, comment)
+    : (comment ? buildNoteComment(comment) : null);
+  if (wrapped) {
+    try { await giip.issueComment(acct, isn, wrapped); }
+    catch (e) { console.error('[giip-task] comment 실패:', e.message); }
+  }
   try { if (status) await giip.issueUpdate(acct, { isn, status }); }
   catch (e) { console.error('[giip-task] status 실패:', e.message); }
 }
@@ -68,12 +117,13 @@ async function maybeFinish(channelId, isn, status, comment) {
 /**
  * 코멘트만 남긴다(상태 전이 없음, best-effort). 작업트리 점유 대기 관계 등
  * "상태는 그대로 두고 사실만 기록"하는 용도. 실패해도 봇 흐름을 막지 않는다.
+ * 일관성을 위해 이 코멘트에도 행위자/시각 헤더를 붙인다.
  */
 async function maybeComment(channelId, isn, comment) {
   if (!isn || !comment) return;
   const acct = accounts.resolve(channelId);
   if (!acct) return;
-  try { await giip.issueComment(acct, isn, comment); }
+  try { await giip.issueComment(acct, isn, buildNoteComment(comment)); }
   catch (e) { console.error('[giip-task] comment(note) 실패:', e.message); }
 }
 
