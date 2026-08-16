@@ -6,6 +6,28 @@
 ## 전제 (Gate)
 - **giip issue API 접근 가능 + 작업 중인 이슈 번호(isn)를 알 때만** 적용. **isn 미상/미연동이면 전량 조용히 스킵.**
 
+## 상태 전이는 항상 코멘트를 동반한다 (강화 규정, giip #1146~1151/#1155 인시던트 재발방지)
+- 2026-08-16: 자매 프로젝트(giipprj, csn 47)에서 무인 세션이 giip 이슈 여러 건을 IN_PROGRESS 로
+  전이시키면서 **코멘트를 전혀 남기지 않아** 누가/언제/왜 착수했는지 추적 불가능했던 인시던트
+  (giip #1146~1151/#1155)가 발생했다. 이 레포(`slack-bot/giip-task.js` `maybeFinish`)도
+  `handlers.js` 가 `comment=null` 로 IN_PROGRESS 전이를 호출해 동일한 결함을 갖고 있었다.
+- **단독 상태변경 금지**(위 §"남기는 시점" 5번 규정의 강화): 상태 전이(PENDING→READY→
+  IN_PROGRESS→REVIEW/DONE 등)는 반드시 코멘트를 동반해야 하며, 그 코멘트에는 다음 3요소를
+  명시한다.
+  - **행위자(Actor)**: 어느 배포/누가 처리했는지. 이 레포는 `GIIP_ACTOR_TAG` 환경변수로
+    배포자가 지정한다(예: 이 PC 배포=`lowyclaude`). 미설정 시 `slack-bot@<hostname>` 자동 폴백.
+  - **시각(When)**: ISO 타임스탬프.
+  - **사유(Why)**: 왜 이 상태로 전이하는지. caller 가 준 comment 가 있으면 그 내용, 없으면
+    "(자동 전이, 상세 사유 미기재)".
+- **코드 레벨 강제**: `slack-bot/giip-task.js`(및 `slack-bot-minimax/giip-task.js`, 동일 코드)의
+  `maybeFinish(channelId, isn, status, comment)` 가 `status` 가 지정된 모든 호출에서 위 헤더가
+  붙은 코멘트를 자동 생성해 남긴다 — caller 가 `comment` 를 `null`/미지정으로 넘겨도(예:
+  `handlers.js` 의 IN_PROGRESS 착수 호출) 코멘트 자체가 스킵되지 않도록 구조적으로 막았다.
+  `maybeComment`(상태전이 없는 note)도 동일하게 행위자/시각 헤더를 붙인다.
+- 정본 쪽(giipprj, `giipdb/docs/30_Specs/SPEC_GISSUE_SCHEDULER.md`, 이 문서 작성 시점 기준
+  §5.1 근방으로 추정 — 다른 에이전트가 병렬로 formalize 중이라 정확한 섹션은 정본에서 확인할 것)
+  에도 동등한 규정이 추가되는 중이다. 동기화 시 이 섹션을 정본 문구로 갱신할 것.
+
 ## 남기는 시점 (논리 단위로, 각 1~3줄 note)
 파일 1개당 코멘트 1개 강제 금지. **논리 묶음** 단위로:
 1. **착수**: 로드해 따르는 role/rule/skill/workflow 명시.
