@@ -54,7 +54,7 @@ async function isClaudeAuthed(env = process.env) {
 // ── Claude 웹 재인증 (브라우저 팝업, 계정별) ───────────────────────────────────
 async function reAuthClaude(account = null) {
   const label = account?.name || 'default';
-  const email = account?.email || 'yusuke.shikatani@bloomin.world';
+  const email = account?.email || 'sample@example.com';
   console.log(`[Auth] claude(${label}) 인증 만료 감지 — 브라우저 인증 시작...`);
   try {
     const r = await spawnAsync('claude', ['auth', 'login', '--email', email], {
