@@ -665,7 +665,9 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         if (isn && planContent) {
           try {
             await giip.issueComment(acct, isn, `📋 작업지시서 (봇 자동 분석)\n\n${planContent}`.slice(0, 8000));
-            await giip.issueUpdate(acct, { isn, status: 'READY' }); // read-modify-write(제목·본문 보존)
+            // read-modify-write(제목·본문 보존). [giip #1211] 상태전이 코멘트(PENDING -> READY)는
+            // giip.issueUpdate 내부에서 항상 자동 등록된다(giip-api.js 참고).
+            await giip.issueUpdate(acct, { isn, status: 'READY' }, { reason: '봇 자동 분석: 작업지시서 첨부 후 READY 승격' });
             promoted = true;
           } catch (e) { console.error('[Bot] issue 작업지시서 첨부 실패:', e.message); }
         }

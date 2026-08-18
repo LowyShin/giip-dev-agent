@@ -6,11 +6,22 @@
  * AK 도출(AdminGetAK) 안 함 — SK 를 AT(token) 자리에 넣으면 401(SK≠AT 혼동 금지, rule 39).
  */
 const https = require('https');
+const os = require('os');
 const { URL } = require('url');
 const accounts = require('./giip-accounts');
 
 const AK_TTL_MS = 20 * 60 * 60 * 1000; // 20h
 const akCache = new Map(); // login_id → { ak, csn, usn, fetchedAt }
+
+/**
+ * [giip #1211] 이 배포가 giip 이슈 상태전이 코멘트에 남길 행위자 이름표.
+ * giip-task.js 의 동명 함수와 동일한 폴백 규칙(GIIP_ACTOR_TAG 우선, 없으면 호스트 기준).
+ * 여기 두는 이유: issueUpdate 자체가 코멘트를 남기므로(아래 참고) giip-task.js 를 거치지
+ * 않는 호출부(giip-commands.js 등)도 이 모듈 하나만으로 행위자 이름표를 얻을 수 있어야 한다.
+ */
+function actorTag() {
+  return process.env.GIIP_ACTOR_TAG || `slack-bot@${os.hostname()}`;
+}
 
 function request(method, urlStr, { headers = {}, body = null, timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -101,8 +112,25 @@ async function issueCreate(account, { title, content, status = 'PENDING', csn, t
   return res.body; // { success, isn, message }
 }
 
-/** PUT 은 전체 덮어쓰기 → read-modify-write 로 미지정 필드 보존(설계 §6). */
-async function issueUpdate(account, fields) {
+/**
+ * PUT 은 전체 덮어쓰기 → read-modify-write 로 미지정 필드 보존(설계 §6).
+ *
+ * [giip #1211] 상태전이 코멘트를 이 함수 자체가 항상 남긴다. 이전에는 giip-task.js#maybeFinish
+ * 를 거치는 호출부만 코멘트를 남기고, giip-commands.js(`giip issue done/review/progress`)나
+ * handlers.js 처럼 issueUpdate 를 직접 호출하는 경로는 코멘트 없이 조용히 상태만 바뀌었다
+ * (giipprj/giipdb/mgmt/updateIssueStatus.ps1 이 opt-in 이라 겪은 것과 동일한 근본 결함,
+ * giip #1155/#1208). 모든 호출부가 이 함수 하나를 거치므로 여기서 강제하면 개별 호출부
+ * 수정 없이도 구조적으로 보장된다. 코멘트 자체가 실패해도 상태 변경은 이미 끝난 뒤이므로
+ * throw 하지 않고 로그만 남긴다(봇 무중단 원칙).
+ *
+ * @param {object} fields isn/title/content/status/csn/target_lssn/agent_workflow
+ * @param {{actor?:string, reason?:string, skipComment?:boolean}} [opts]
+ *   actor: 코멘트에 남길 행위자 이름표(기본: actorTag()).
+ *   reason: 상태 변경 사유(기본: "(사유 미기재 - 자동 기본값)").
+ *   skipComment: true 면 이 함수가 코멘트를 남기지 않는다 — 호출부(giip-task.js#maybeFinish)가
+ *     이미 자기 코멘트를 남기는 경우 중복 방지용으로만 쓴다.
+ */
+async function issueUpdate(account, fields, opts = {}) {
   const cur = await issueGet(account, fields.isn);
   const merged = {
     isn: fields.isn,
@@ -115,6 +143,26 @@ async function issueUpdate(account, fields) {
   };
   const res = await issueApi(account, 'PUT', { body: merged });
   if (res.status !== 200) throw new Error(`issueUpdate 실패: ${res.body?.error || res.status}`);
+
+  const oldStatus = cur.status ?? cur.Status ?? null;
+  const newStatus = merged.status;
+  if (!opts.skipComment && fields.status && newStatus && oldStatus !== newStatus) {
+    try {
+      const actor = opts.actor || actorTag();
+      const reason = opts.reason || '(사유 미기재 - 자동 기본값)';
+      const when = new Date().toISOString();
+      const commentBody = [
+        `## [${actor}] ISN ${fields.isn} 상태전이: ${oldStatus || 'UNKNOWN'} -> ${newStatus}`,
+        `**행위자(Actor)**: ${actor}`,
+        `**시각(When)**: ${when}`,
+        `**사유(Why)**: ${reason}`,
+      ].join('\n');
+      await issueComment(account, fields.isn, commentBody);
+    } catch (e) {
+      console.error(`[giip-api] 상태전이 코멘트 등록 실패(isn=${fields.isn}):`, e.message);
+    }
+  }
+
   return res.body;
 }
 
@@ -186,6 +234,7 @@ async function apiCall(account, verb, jsondata = null) {
 
 module.exports = {
   getAK,
+  actorTag,
   issueGet,
   issueList,
   issueCreate,

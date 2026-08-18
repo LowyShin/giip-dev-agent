@@ -17,23 +17,6 @@ function actorTag() {
   return process.env.GIIP_ACTOR_TAG || `slack-bot@${os.hostname()}`;
 }
 
-/**
- * 상태전이 코멘트에 행위자(actor)·시각(when)·사유(why) 헤더를 항상 붙인다.
- * giip #1146~1151/#1155 인시던트(무인 세션이 코멘트 없이 IN_PROGRESS 전이) 재발방지 —
- * caller 가 comment 를 안 줘도(null) 이 헤더만은 구조적으로 남긴다.
- */
-function buildTransitionComment(isn, status, comment) {
-  const actor = actorTag();
-  const when = new Date().toISOString();
-  const why = comment ? String(comment) : '(자동 전이, 상세 사유 미기재)';
-  return [
-    `## [${actor}] ISN ${isn} 상태전이: → ${status}`,
-    `**행위자(Actor)**: ${actor}`,
-    `**시각(When)**: ${when}`,
-    `**사유(Why)**: ${why}`,
-  ].join('\n');
-}
-
 /** 상태전이가 없는 note 코멘트에도 일관되게 행위자/시각 헤더를 붙인다. */
 function buildNoteComment(comment) {
   const actor = actorTag();
@@ -95,23 +78,29 @@ async function maybeCreateIssue(channelId, title, content, csn = null) {
 
 /**
  * 완료/에러/착수 시: 코멘트 + 상태전이(best-effort, 실패해도 무시).
- * 상태 전이(status 지정)는 comment 인자 유무와 무관하게 항상 행위자/시각/사유 헤더가 붙은
- * 코멘트를 남긴다 — "comment=null 이면 코멘트 자체를 스킵"하던 구버전 버그(giip #1155)가
- * 재발하지 않도록 여기서 구조적으로 막는다. caller 가 준 comment 는 "사유"에 그대로 보존된다.
+ * [giip #1211] 상태전이 코멘트 자체는 이제 giip-api.js#issueUpdate 가 항상 남긴다(그래야
+ * giip-commands.js 등 issueUpdate 를 직접 호출하는 다른 경로도 구조적으로 보장됨). 이 함수는
+ * caller 가 준 comment 를 "사유(Why)"로 그대로 전달하기만 한다 — "comment=null 이면 코멘트
+ * 자체를 스킵"하던 구버전 버그(giip #1155)는 issueUpdate 쪽에서 기본 사유로 채워지므로 재발하지
+ * 않는다.
  */
 async function maybeFinish(channelId, isn, status, comment) {
   if (!isn) return;
   const acct = accounts.resolve(channelId);
   if (!acct) return;
-  const wrapped = status
-    ? buildTransitionComment(isn, status, comment)
-    : (comment ? buildNoteComment(comment) : null);
-  if (wrapped) {
-    try { await giip.issueComment(acct, isn, wrapped); }
+  if (status) {
+    try {
+      await giip.issueUpdate(acct, { isn, status }, {
+        actor: actorTag(),
+        reason: comment ? String(comment) : '(자동 전이, 상세 사유 미기재)',
+      });
+    } catch (e) { console.error('[giip-task] status 실패:', e.message); }
+    return;
+  }
+  if (comment) {
+    try { await giip.issueComment(acct, isn, buildNoteComment(comment)); }
     catch (e) { console.error('[giip-task] comment 실패:', e.message); }
   }
-  try { if (status) await giip.issueUpdate(acct, { isn, status }); }
-  catch (e) { console.error('[giip-task] status 실패:', e.message); }
 }
 
 /**
