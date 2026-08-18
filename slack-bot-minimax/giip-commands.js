@@ -187,9 +187,11 @@ async function handleGiipCommand(rawText, channelId) {
         const r = await giip.issueCreate(acct, { title, content: title, status: 'IN_PROGRESS' });
         return { handled: true, text: `✅ 이슈 생성 #${r.isn} — ${title}` };
       }
-      if (action === 'done') { await giip.issueUpdate(acct, { isn: Number(arg), status: 'DONE' }); return { handled: true, text: `✅ #${arg} → DONE` }; }
-      if (action === 'review') { await giip.issueUpdate(acct, { isn: Number(arg), status: 'REVIEW' }); return { handled: true, text: `✅ #${arg} → REVIEW` }; }
-      if (action === 'progress' || action === 'start') { await giip.issueUpdate(acct, { isn: Number(arg), status: 'IN_PROGRESS' }); return { handled: true, text: `✅ #${arg} → IN_PROGRESS` }; }
+      // [giip #1211] 상태전이 코멘트는 giip.issueUpdate 내부에서 항상 자동 등록된다(giip-api.js 참고) —
+      // 여기서는 어떤 Slack 명령이 트리거했는지만 reason 으로 넘긴다.
+      if (action === 'done') { await giip.issueUpdate(acct, { isn: Number(arg), status: 'DONE' }, { reason: 'Slack 명령: giip issue done' }); return { handled: true, text: `✅ #${arg} → DONE` }; }
+      if (action === 'review') { await giip.issueUpdate(acct, { isn: Number(arg), status: 'REVIEW' }, { reason: 'Slack 명령: giip issue review' }); return { handled: true, text: `✅ #${arg} → REVIEW` }; }
+      if (action === 'progress' || action === 'start') { await giip.issueUpdate(acct, { isn: Number(arg), status: 'IN_PROGRESS' }, { reason: `Slack 명령: giip issue ${action}` }); return { handled: true, text: `✅ #${arg} → IN_PROGRESS` }; }
       if (action === 'get' || action === 'show') { const i = await giip.issueGet(acct, Number(arg)); return { handled: true, text: code(i, 1500) }; }
       if (action === 'comment') {
         const cm = arg.match(/^(\d+)\s+([\s\S]+)$/);

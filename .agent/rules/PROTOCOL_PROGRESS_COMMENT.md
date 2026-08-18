@@ -19,14 +19,23 @@
   - **시각(When)**: ISO 타임스탬프.
   - **사유(Why)**: 왜 이 상태로 전이하는지. caller 가 준 comment 가 있으면 그 내용, 없으면
     "(자동 전이, 상세 사유 미기재)".
-- **코드 레벨 강제**: `slack-bot/giip-task.js`(및 `slack-bot-minimax/giip-task.js`, 동일 코드)의
-  `maybeFinish(channelId, isn, status, comment)` 가 `status` 가 지정된 모든 호출에서 위 헤더가
-  붙은 코멘트를 자동 생성해 남긴다 — caller 가 `comment` 를 `null`/미지정으로 넘겨도(예:
-  `handlers.js` 의 IN_PROGRESS 착수 호출) 코멘트 자체가 스킵되지 않도록 구조적으로 막았다.
-  `maybeComment`(상태전이 없는 note)도 동일하게 행위자/시각 헤더를 붙인다.
-- 정본 쪽(giipprj, `giipdb/docs/30_Specs/SPEC_GISSUE_SCHEDULER.md`, 이 문서 작성 시점 기준
-  §5.1 근방으로 추정 — 다른 에이전트가 병렬로 formalize 중이라 정확한 섹션은 정본에서 확인할 것)
-  에도 동등한 규정이 추가되는 중이다. 동기화 시 이 섹션을 정본 문구로 갱신할 것.
+- **코드 레벨 강제(2026-08-18 갱신, giip #1211)**: 2026-08-16 판(위 문단)은 `giip-task.js#maybeFinish`
+  에만 강제를 걸어, 이를 거치지 않는 `giip-commands.js`(`giip issue done/review/progress` Slack
+  명령)와 `handlers.js` 의 일부 `issueUpdate` 직접 호출은 여전히 코멘트 없이 조용히 상태만
+  바뀌는 구멍이 남아 있었다(giipprj `updateIssueStatus.ps1` 이 `-Actor`/`-Reason` opt-in 이라
+  실효성이 없었던 것과 동일한 근본 결함). 이제 이 함수는 **`slack-bot/giip-api.js#issueUpdate`
+  자체**로 이동했다 — `fields.status` 가 주어지고 실제로 값이 바뀌면(현재 상태를 읽어 대조),
+  호출부가 무엇이든(`giip-commands.js` 직접 호출 포함) 항상 "[Actor] ISN X 상태전이:
+  `<이전상태>` -> `<새상태>`" 헤더가 붙은 코멘트를 자동 등록한다(이전상태도 이번에 추가 — 과거엔
+  `→ <새상태>`만 표기해 "어느 상태에서" 왔는지가 없었다). `actor`/`reason` 은 `opts` 로 넘길 수
+  있고(기본값: `actorTag()`/`"(사유 미기재 - 자동 기본값)"`), `giip-task.js#maybeFinish` 는
+  자신이 별도로 코멘트를 만들지 않고 이 `opts.reason` 에 caller comment 를 실어 넘기기만 한다
+  (중복 코멘트 방지). `skipComment` opts 는 향후 호출부가 자체 코멘트를 남기고 싶을 때만 쓴다.
+  `slack-bot-minimax/`도 동일하게 적용(byte-identical 유지). `slack-bot-openclaw/`는 giip 이슈
+  연동 코드 자체가 없어 해당 없음.
+- 정본 쪽은 `giipprj/giipdb/mgmt/updateIssueStatus.ps1`(giip #1211, `-Actor`/`-Reason` 이 비어도
+  기본값으로 채워 항상 코멘트) — 접근 방식은 다르지만(PowerShell vs Node HTTP API) "opt-in 이면
+  실효성이 없다"는 동일한 교훈을 반영한다.
 
 ## 남기는 시점 (논리 단위로, 각 1~3줄 note)
 파일 1개당 코멘트 1개 강제 금지. **논리 묶음** 단위로:
@@ -46,7 +55,8 @@
 (lowyworkenv `scripts/gissue/get-issue.sh`와 동일 계열 — `giip-accounts.js`에서 csn에 맞는 SK를 읽어
 `giipIssueComments` 엔드포인트로 POST). 한글 콘텐츠는 `\uXXXX` JSON escape로 보내야 안 깨진다
 ([[reference_giip_issue_sk_api]] 참고).
-- 상태 변경은 코멘트와 분리된 별도 status-only PUT으로 처리한다.
+- 상태 변경(PUT) 자체가 `issueUpdate` 내부에서 상태전이 코멘트를 자동으로 동반한다(위 §"상태 전이는
+  항상 코멘트를 동반한다" 2026-08-18 갱신 참고) — 별도로 코멘트 POST 를 먼저/나중에 호출할 필요 없음.
 
 ## 연계
 - 정본: `giipprj/.agent/rules/PROTOCOL_PROGRESS_COMMENT.md` (전체 규칙·result 게이트·완료 위조 금지 포함).
