@@ -1,0 +1,107 @@
+# 매시 이슈 처리 스케줄러 표준 스펙
+
+giip issue 상태머신(PENDING→READY→IN_PROGRESS→REVIEW/DONE, +REVIEW→TESTED)을 매시 정해진 분에
+무인으로 자동 처리하는 스케줄러의 **이식 가능한 표준 스펙**입니다. 여기가 **정본(canonical spec)**이며,
+각 배포 대상(다른 PC, 다른 프로젝트, 다른 CSN)은 자기 경로만 채워 이 스펙을 그대로 참고/이식합니다.
+
+원본 구현: `lowyworkenv/scripts/gissue/run-gissue-claude.ps1`(csn 47, giipprj 대상 실제 운영 인스턴스).
+이 문서는 그 구현에서 플랫폼 종속 부분(절대경로, 이 PC 전용 계정)을 걷어내고 남긴 이식 가능한 뼈대입니다.
+
+## 1) 목적/역할
+
+- giip issue API를 CSN(고객사/프로젝트 식별자) 단위로 폴링해, 사람 개입 없이 이슈를 정제→실행→검증까지
+  진행시킵니다.
+- 목표는 "이슈가 등록된 뒤 방치되는 시간"을 없애는 것 — PENDING을 작업 지시서로 정제하고, READY를
+  코드/문서 변경으로 실행하고, 멈춘 IN_PROGRESS를 회수하고, 실패한 PR을 고치고, REVIEW를 재검증합니다.
+- CSN마다 별도 프로세스(또는 별도 -OnlyCsn 실행)로 격리되어, 서로 다른 프로젝트 폴더를 침범하지 않습니다.
+
+## 2) 트리거 스펙
+
+- **매시 :07** 시작(임의로 고른 분 — 정각/일반적인 :00, :05, :10 트리거들과 충돌을 피하기 위한 선택).
+- cron 표현식(다른 플랫폼/Linux 참고용): `7 * * * *`
+- Windows Task Scheduler 기준: 최초 트리거 `00:07:00` 시작, `1시간마다 반복`, 무기한 지속.
+
+## 3) 실행 커맨드 템플릿
+
+```powershell
+powershell.exe -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass `
+  -File "<REPO_ROOT>/scripts/gissue/run-gissue-claude.ps1"
+```
+
+- `<REPO_ROOT>`: 이 스케줄러 스크립트 세트를 배치한 오케스트레이션 레포의 루트(원본 배포에서는
+  lowyworkenv).
+- 단일 CSN만 즉시 실행/드라이런하려면 `-OnlyCsn <csn>` 인자를 추가합니다(`-DryRun`과 조합 가능).
+- Windows Task Scheduler 대신 cron/systemd timer 등 다른 스케줄러로 이식할 경우, 이 커맨드 자체를
+  그대로 그 스케줄러의 실행 대상으로 등록하면 됩니다(플랫폼별 셸 래퍼만 다르면 됨).
+
+## 4) 필수 선행조건
+
+- **CSN→프로젝트 매핑 파일**(원본: `csn-projects.json`): 각 CSN을 어느 로컬 프로젝트 폴더에서
+  처리할지 매핑. `enabled: false`인 CSN은 자동 실행에서 건너뜁니다. 새 CSN을 추가하려면 이 파일에
+  항목 1개를 추가하면 됩니다.
+- **giip issue API 접근용 SK(Secret Key)**: CSN별 계정 SK가 필요합니다(원본은
+  `slack-bot/.secrets/giip-accounts.json`의 `channels[*].sk`를 CSN으로 매칭해 조회). 이 파일은
+  git 비추적 시크릿이므로 배포 대상마다 별도로 준비해야 합니다.
+- **AI 엔진 키**: 이 스케줄러는 이슈 처리 본체를 `claude -p`(헤드리스, 컨펌 없이 자율 실행)로
+  실행합니다. `MINIMAX_API_KEY`가 있으면 MiniMax를 우선 시도하고, 실패/한도 초과 시 같은 실행
+  안에서 즉시 `claude`로 폴백합니다(키가 없으면 기존처럼 항상 claude만 사용). 엔진 우선순위 정책은
+  이 조직의 `MODEL_USAGE_SPEC.md`(전 AI 처리 MiniMax 메인 + Claude는 QA/폴백)와 동일합니다.
+- **로그 디렉터리**: 원본은 `scripts/gissue/logs/`에 CSN별 로그(`gissue_csn<csn>.log`)와 lock
+  파일을 남깁니다. 배포 대상은 쓰기 가능한 로그 경로를 준비해야 합니다.
+- **giip issue 코멘트/상태변경 클라이언트**: CSN 교차오염(다른 CSN 이슈를 잘못 건드리는 사고,
+  giip #1053/#1079)을 막기 위해, 쓰기 직전 그 이슈의 실제 CSN을 재확인하는 게이트가 있는 클라이언트를
+  권장합니다(원본은 `scripts/gissue/get-issue.sh --comment-file`/`--status`에 이 게이트가 내장).
+  한글/이모지가 섞인 코멘트 본문은 반드시 UTF-8 파일로 저장한 뒤 파일 경로로 전달해야 합니다
+  (커맨드라인 리터럴 직접 전달은 headless 실행 체인에서 시스템 기본 코드페이지로 mojibake가 나는
+  사고가 재현 확인됨, giip #1030).
+
+## 5) 상태머신 개요 (8단계)
+
+매 :07 실행마다 아래 순서로 수행합니다(원본 프롬프트 템플릿의 `[0]`, `[A]`~`[H]` 대응):
+
+| 단계 | 이름 | 한 줄 요약 |
+|---|---|---|
+| [0] | PR conflict 우선 해결 | 이슈 처리 착수 전, 담당 프로젝트(+nested repo)의 열려있고 conflict 난 PR을 먼저 해소 |
+| [A] | 슬래시 커맨드 즉시 실행 | 제목/본문/최신 코멘트가 `/`로 시작하면 상태·나이 무관하게 즉시 해당 워크플로우 기동 |
+| [B] | PENDING 정제 | 내용을 분석해 작업 지시서 코멘트를 남기고 READY로 전이(실행까지는 안 함) |
+| [C] | READY 실행 | READY로 1시간 이상 경과한 것만, IN_PROGRESS로 선점 후 실제 처리(PR 완료 게이트 + Actionflow 테스트 게이트 통과 시 DONE) |
+| [D] | IN_PROGRESS 회수(reclaim) | 1시간 이상 활동 없는 IN_PROGRESS를 원인 분석 후 이어받아 완수 — 죽은/멈춘 세션 복구 |
+| [E] | PR CI 실패 점검 | 이슈 유무와 무관하게 매번, 열린 PR 중 CI/검증 실패한 것을 원인 규명 후 로컬 재검증 통과 시에만 수정 push |
+| [F] | Orphan stash 구조 | 이전 실행이 안전하게 stash해둔 "죽은 세션 잔해"를 이슈와 매칭시켜 구조(확신 없으면 사람에게 위임) |
+| [G] | REVIEW 재검증 | REVIEW 이슈를 Actionflow로 재테스트해 SUCCESS면 TESTED로(자동 DONE은 하지 않음 — 최종 종결은 사람) |
+| [H] | 최근 코멘트 논리 재검증 | 최근 2시간 내 코멘트의 "검증 가능한 사실 주장"을 직접 재확인해, 틀렸으면 정정 코멘트+상태 복구 |
+
+각 단계 상세 규칙(선점/코멘트 프로토콜, 3회 defer 상한, PR 완료 게이트, Actionflow 테스트 게이트 등)은
+원본 구현 `lowyworkenv/scripts/gissue/run-gissue-claude.ps1`의 `$PromptTemplate` 전문을 참고합니다
+(본문 복제 금지 — 상세 로직이 자주 갱신되므로 이 문서는 개요만 유지).
+
+## 6) 절대 규칙 — 성역(sanctuary) 보호
+
+이 스케줄러가 처리하는 프로젝트 중 하나 이상에 **절대 코드 수정 금지 성역**이 존재할 수 있습니다.
+원본 배포의 대표 사례: `giipfaw`(및 그 하위 `giipApiSk2/run.ps1`)는 어떤 이유로도 스케줄러가 직접
+수정하지 않습니다 — 필요한 로직 변경은 SP(저장 프로시저)나 프로젝트 코드 내에서만 해결합니다.
+
+이식 시 반드시 확인할 것:
+- 이 배포 대상이 처리할 CSN/프로젝트 각각에 성역 파일/디렉터리가 있는지 사전 조사(CSN→프로젝트
+  매핑 파일의 `note` 필드에 프로젝트별 성역 여부를 기록하는 관례를 따르는 것을 권장합니다).
+- 성역이 있으면, 해당 파일 수정이 불가피한 이슈는 자동 처리를 포기하고 REVIEW로 전이 +
+  "성역 파일 수정 필요, 사람 확인 요청" 코멘트로 넘기도록 CSN별 규칙에 명시합니다.
+- 강제 언블록(정지된 브랜치 자동 해제) 로직을 이식할 경우, 성역 레포는 그 대상에서 제외해야
+  합니다 — 병합 여부가 불확실한 상태에서 성역 레포를 강제로 건드리는 것보다, 경고+코멘트 후
+  포기하는 경로가 더 안전하다는 것이 원본의 판단 근거입니다.
+
+## 7) 정본 위치
+
+이 문서(`giip-fde-agent/docs/60-operations/hourly-issue-scheduler.md`)가 이 스케줄러 표준의
+**정본**입니다. 다른 배포 대상(다른 PC, 다른 레포)은 이 문서를 참고해 자기 환경에 맞게 이식하되,
+이 문서 자체를 각자 복제해 따로 관리하지 말고 이 경로를 가리키는 포인터만 남기는 것을 권장합니다
+(예: `lowyworkenv/scripts/gissue/SCHEDULER_CONTROL.md` 상단 포인터 참고).
+
+등록 스크립트: `giip-fde-agent/scripts/register-hourly-issue-scheduler.ps1`(파라미터화된 Windows
+Task Scheduler 등록 스크립트, 이 문서의 §2~§3 스펙을 그대로 구현).
+
+## 8) 연결 문서
+
+- KPI 표준: `./ai-native-kpi.md`
+- 장애/롤백 플레이북: `./incident-rollback-playbook.md`
+- 원본 운영 인스턴스 제어법(이 PC 전용): `lowyworkenv/scripts/gissue/SCHEDULER_CONTROL.md`
