@@ -217,9 +217,20 @@ function deleteProjectLang(name) {
   }
   return false;
 }
+// giip #1252: csn 의 실제 언어(tCorp.cLang, csn-lang-cache 경유)를 project-lang.json 수동맵보다
+// 우선한다. 캐시 미스/조회실패/csn 미상 시엔 항상 기존 수동맵 → DEFAULT_LANG 순으로 조용히
+// 폴백한다(csn-lang-cache.peekCachedLangCode 는 순수 동기·네트워크 없음이라 기존 호출부를
+// async 로 바꾸지 않고도 안전하게 끼워 넣을 수 있다). 캐시를 채우는 백그라운드 조회는
+// csn-lang-cache.prefetch(account, csn) 를 account/csn 이 함께 확보되는 지점에서 호출한다
+// (handlers.js issue 등록/answerInChannel, giip-task.js maybeCreateIssue 등).
 function resolveLangForProject(projectName) {
   const key = String(projectName || '').trim().toLowerCase();
   if (!key) return DEFAULT_LANG;
+  const csn = resolveProjectCsn(key);
+  if (csn != null) {
+    const csnLang = require('./csn-lang-cache').peekCachedLangCode(csn);
+    if (csnLang) return csnLang;
+  }
   return loadProjectLangMap()[key] || DEFAULT_LANG;
 }
 function resolveLangNameForProject(projectName) {

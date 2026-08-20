@@ -219,6 +219,32 @@ async function grantBotCsn(account, csn) {
   return { ok: rstVal === 200, rstVal, already, msg, raw };
 }
 
+/**
+ * [giip #1252] csn 의 실제 언어 설정(tCorp.cLang) 조회 — giipdb SP pApiCorpLangGetbySk 호출.
+ * 이 SP 는 giipprj/giipdb/SP/pApiCorpLangGetbySk.sql 에 이미 존재하지만(2025-12-26 신설, MQE AI
+ * Advisor 용), **일반 bySk 검증(tSecretKey↔csn) 이 아니라 하드코딩된 단일 Admin SK 게이트**다
+ * (`IF (@sk = 'ffd968...')` 외엔 전부 403). giip-fde-agent 는 각 채널의 테넌트 SK(account.sk)만
+ * 갖고 있어 이 호출은 (admin SK 를 쓰지 않는 한) 403 으로 실패할 가능성이 높다 — 그래도 실패는
+ * 정상 흐름으로 취급해 호출측이 조용히 project-lang.json/DEFAULT_LANG 으로 폴백하게 한다(장애 유발 금지).
+ * 후속 조치(giipdb 쪽): SP 를 호출자 자신의 csn 범위로 tSecretKey 검증하도록 완화하거나, 이 봇 전용
+ * admin SK 를 안전하게 프로비저닝해야 실제로 200 을 받을 수 있다(이번 PR 범위 밖).
+ *
+ * 디스패처 규약: pApiCorpLangGetbySk 는 이름에 "Get" 이 포함돼 giipApiSk2/run.ps1 의 jsondata
+ * 자동첨부(ISN 161)가 스킵된다 — 그래서 csn 은 jsondata 가 아니라 text 뒤에 숫자 리터럴로 직접
+ * 붙여 보낸다(`CorpLangGet <csn>` → `exec pApiCorpLangGetbySk '<sk>', <csn>`), apiCall 의 jsondata
+ * 인자는 쓰지 않는다.
+ * @returns {{ ok:boolean, cLang:string|null, rstVal:number|null, raw:any }}
+ */
+async function corpLangGet(account, csn) {
+  const n = Number(csn);
+  if (!Number.isInteger(n)) throw new Error('csn 은 정수여야 합니다.');
+  const raw = await apiCall(account, `CorpLangGet ${n}`);
+  const row = raw && Array.isArray(raw.data) ? raw.data[0] : null;
+  const rstVal = row && row.RstVal != null ? Number(row.RstVal) : null;
+  const cLang = rstVal === 200 && row && row.cLang ? String(row.cLang) : null;
+  return { ok: rstVal === 200, cLang, rstVal, raw };
+}
+
 /** 범용: 임의 giip API 를 giipApi 디스패처로 호출(text=Verb). */
 async function apiCall(account, verb, jsondata = null) {
   const base = account.apiBase || accounts.apiBase();
@@ -243,5 +269,6 @@ module.exports = {
   issueComments,
   apiCall,
   grantBotCsn,
+  corpLangGet,
   _akCache: akCache,
 };

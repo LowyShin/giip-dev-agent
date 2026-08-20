@@ -44,6 +44,20 @@ async function resolveChannelName(channelId) {
   return name;
 }
 
+// [giip #1252] csn 이 인식되는 지점(project→csn 매핑 확보 시점)마다 호출해 그 csn 의 실제 언어
+// (tCorp.cLang, csn-lang-cache 경유)를 백그라운드로 조회해 캐시를 채운다. fire-and-forget —
+// 이번 응답에는 반영되지 않는다(캐시 미스 시 config.resolveLangForProject 가 project-lang.json
+// 수동맵/DEFAULT_LANG 으로 폴백). 다음 메시지부터 캐시가 우선 사용된다. giip 계정 미연결/조회
+// 실패는 완전히 무시한다 — 언어 감지는 절대 응답 흐름을 막아선 안 된다.
+function triggerCsnLangPrefetch(channelId, projectName) {
+  try {
+    const csn = config.resolveProjectCsn(projectName);
+    const acct = require('./giip-accounts').resolve(channelId);
+    const effCsn = csn != null ? csn : (acct && acct.csn != null ? acct.csn : null);
+    if (acct && effCsn != null) require('./csn-lang-cache').prefetch(acct, effCsn).catch(() => {});
+  } catch (e) { /* best-effort */ }
+}
+
 async function buildAllowlistReply() {
   const users = config.ALLOWED_USERS;
   const channels = config.CHANNEL_IDS;
@@ -116,6 +130,7 @@ async function answerInChannel({ channelId, replyTs, text, workDir = BASE_DIR, t
   }
 
   const projectName = path.basename(workDir);
+  triggerCsnLangPrefetch(channelId, projectName);
   const agentDir = getAgentDir(workDir);
   let prompt = `You are giipclaude, an AI assistant. Always respond in ${config.resolveLangNameForProject(projectName)}.
 
@@ -289,6 +304,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
   }
 
   const projectName = path.basename(workDir);
+  triggerCsnLangPrefetch(channelId, projectName);
   const agentDirDM = getAgentDir(workDir);
   let prompt = `You are giipclaude, an AI assistant. Always respond in ${config.resolveLangNameForProject(projectName)} regardless of the language the user writes in.\n\nWorking project: ${projectName}\nWorking directory: ${workDir}\nAgent context directory: ${agentDirDM} (roles/, rules/, skills/, workflows/)\nRead relevant files from the agent context directory to apply the correct role and rules.\n\nIMPORTANT: Answer based on your knowledge of the project and K-Layer context. If you do not know the answer, say "모르겠습니다" clearly.\n\n되묻지 말고 실측: 설정·사양은 직접 조회하라. giip 서비스 설정(SMTP 등)의 정본=giipdb \`docs/30_Specs/\` + DB(예: SMTP=\`tEmailServerConfig\`, API \`EmailServerConfigGetActive\`). 사람만 아는 값만 질문한다.\n\nMANDATORY RULE — Task Number: If the user's message contains a 14-digit task number (e.g. 20260630170105), you MUST start your response with "[태스크 \`<task_number>\`]" on the very first line. Never omit the task number from your response.`;
   if (claims.length) prompt += '\n\nK-Layer:\n' + claims.map(c=>`• ${c}`).join('\n');
@@ -709,8 +725,13 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     const effWorkDir = /^giip\s+/i.test(text.trim())
       ? path.join(config.PROJECTS_ROOT, 'giipprj')
       : workDir;
+    // [giip #1252] 확인/에러 메시지 다국어화(범위: 이 등록 트리거만, i18n-issue-reg.js 참고).
+    // 트리거 자체(등록/登録/register)와 body(내용)는 이미 언어 무관하게 그대로 통과되므로 그대로 둔다.
+    const effProjectName = projectName || path.basename(effWorkDir);
+    const msgLang = config.resolveLangForProject(effProjectName);
+    const msg = require('./i18n-issue-reg').t;
     if (!body) {
-      await postMessage(channelId, '사용법: `<프로젝트> issue 등록 <내용>` — 내용을 그대로 giip issue 로 등록합니다.', replyTs);
+      await postMessage(channelId, msg(msgLang, 'usage'), replyTs);
       return;
     }
     const title = body.split(/\r?\n/)[0].slice(0, 200).trim() || '(무제)';
@@ -719,25 +740,25 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
       const giip = require('./giip-api');
       const acct = giipAccounts.resolve(channelId);
       if (!acct) {
-        await postMessage(channelId,
-          '⚠️ giip 계정 미설정입니다. `giip account set <login_id> <sk> [csn]` 로 먼저 등록하세요(SK 포함이라 DM 권장).',
-          replyTs);
+        await postMessage(channelId, msg(msgLang, 'noAccount'), replyTs);
         return;
       }
+      const csn = config.resolveProjectCsn(effProjectName) ?? acct.csn ?? null;
+      triggerCsnLangPrefetch(channelId, effProjectName); // 캐시 워밍(fire-and-forget), 이번 응답엔 미반영
       // giipprj(giipprj 폴더) 는 의뢰를 그대로 넣지 않고, 분석해 '작업지시서' 수준으로 등록한다.
       //   무인 처리기(run-gissue-claude)의 refine([B]) 를 등록 시점에 앞당겨 수행하는 셈:
       //   raw 본문은 content 로, 분석된 작업지시서는 코멘트로 붙이고 status=READY 로 두면
       //   처리기 [C](READY + 지시서 코멘트)가 다음 :20/:40 에 바로 착수한다.
       const isGiipprj = /(^|[\\/])giipprj$/i.test(String(effWorkDir).replace(/[\\/]+$/, ''));
       if (isGiipprj) {
-        await postMessage(channelId, '🔍 의뢰 내용을 분석해 작업지시서로 정리 중입니다... (수십 초 소요)', replyTs);
+        await postMessage(channelId, msg(msgLang, 'analyzing'), replyTs);
         let planContent = null;
         try { ({ planContent } = tm.analyzeRequest(body, null, effWorkDir)); }
         catch (e) { console.error('[Bot] issue 등록 분석 실패:', e.message); }
 
         const specTitle = ((planContent && tm.extractTitle(planContent)) || title).slice(0, 200);
         // create 는 항상 PENDING 으로(유실 방지). 분석 성공 시에만 작업지시서 코멘트 + READY 로 승격.
-        const r = await giip.issueCreate(acct, { title: specTitle, content: body.slice(0, 8000), status: 'PENDING', csn: config.resolveProjectCsn(projectName || effWorkDir) });
+        const r = await giip.issueCreate(acct, { title: specTitle, content: body.slice(0, 8000), status: 'PENDING', csn });
         const isn = r && r.isn ? Number(r.isn) : null;
         let promoted = false;
         if (isn && planContent) {
@@ -751,27 +772,21 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         }
         await postMessage(channelId,
           isn
-            ? [
-                `✅ giip issue #${isn} 등록 완료 (${promoted ? 'READY · 작업지시서 첨부 → 자동 처리 대기' : 'PENDING · 무인 refine 대기'})`,
-                `• 제목: ${specTitle}`,
-                ...(promoted ? ['', '```', planContent.slice(0, 1200), '```'] : []),
-              ].join('\n')
-            : '⚠️ issue 등록 응답에 isn 이 없습니다. 계정/CSN 설정을 확인하세요.',
+            ? msg(msgLang, promoted ? 'doneReady' : 'donePending', { isn, title: specTitle, plan: planContent ? planContent.slice(0, 1200) : '' })
+            : msg(msgLang, 'noIsn'),
           replyTs);
         return;
       }
       // 그 외 프로젝트: 의뢰를 그대로 PENDING 으로 등록(무인 처리기가 refine 부터 수행).
       //   IN_PROGRESS 로 만들면 PENDING/READY 만 집는 처리기의 사각지대에 빠져 '먹통'이 된다.
-      const r = await giip.issueCreate(acct, { title, content: body.slice(0, 8000), status: 'PENDING', csn: config.resolveProjectCsn(projectName || effWorkDir) });
+      const r = await giip.issueCreate(acct, { title, content: body.slice(0, 8000), status: 'PENDING', csn });
       const isn = r && r.isn ? Number(r.isn) : null;
       await postMessage(channelId,
-        isn
-          ? `✅ giip issue #${isn} 등록 완료 (PENDING · 대기열 등록 → 자동 처리 대기)\n• 제목: ${title}`
-          : '⚠️ issue 등록 응답에 isn 이 없습니다. 계정/CSN 설정을 확인하세요.',
+        isn ? msg(msgLang, 'doneQueued', { isn, title }) : msg(msgLang, 'noIsn'),
         replyTs);
     } catch (e) {
       console.error('[Bot] issue 등록 실패:', e.message);
-      await postMessage(channelId, `❌ issue 등록 실패: ${e.message}`, replyTs);
+      await postMessage(channelId, msg(msgLang, 'error', { message: e.message }), replyTs);
     }
     return;
   }
