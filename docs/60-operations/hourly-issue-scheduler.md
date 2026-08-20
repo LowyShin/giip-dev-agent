@@ -19,7 +19,10 @@ giip issue 상태머신(PENDING→READY→IN_PROGRESS→REVIEW/DONE, +REVIEW→T
 
 - **매시 :07** 시작(임의로 고른 분 — 정각/일반적인 :00, :05, :10 트리거들과 충돌을 피하기 위한 선택).
 - cron 표현식(다른 플랫폼/Linux 참고용): `7 * * * *`
-- Windows Task Scheduler 기준: 최초 트리거 `00:07:00` 시작, `1시간마다 반복`, 무기한 지속.
+- Windows Task Scheduler 기준: 최초 트리거 `00:07:00` 시작, `1시간마다 반복`, 사실상 무기한 지속
+  (`[TimeSpan]::MaxValue`는 ISO8601 직렬화 시 Task Scheduler XML의 duration 상한을 초과해
+  `Register-ScheduledTask`가 거부하므로(HRESULT 0x80041318, giip #1275), 실제로는 유효 범위 내
+  충분히 큰 값 — 약 10년(`New-TimeSpan -Days 3650`) — 을 사용).
 
 ## 3) 실행 커맨드 템플릿
 

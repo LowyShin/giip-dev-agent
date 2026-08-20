@@ -85,9 +85,14 @@ function Register-HourlyTask {
     $execArgs = "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"$runner`""
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $execArgs
 
+    # 주의: [TimeSpan]::MaxValue 는 "무기한 반복" 의도로 쓰였으나, ISO8601 duration으로 직렬화하면
+    # P99999999DT23H59M59S 가 되어 Task Scheduler XML 스키마의 duration 상한을 초과한다. 그 결과
+    # Register-ScheduledTask 가 "태스크 XML에 부적절한 설정이 있거나 범위 외의 값이 포함되어 있습니다"
+    # (HRESULT 0x80041318)로 등록 자체를 거부한다(giip #1275, 실측). 대신 유효 범위 내에서 충분히 큰
+    # 값(약 10년)을 써서 사실상 무기한 반복을 구현한다.
     $trigger = New-ScheduledTaskTrigger -Once -At $StartTime `
         -RepetitionInterval (New-TimeSpan -Minutes $RepetitionMinutes) `
-        -RepetitionDuration ([TimeSpan]::MaxValue)
+        -RepetitionDuration (New-TimeSpan -Days 3650)
 
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
