@@ -51,6 +51,11 @@ function isRetryableIssueError(e) {
 async function maybeCreateIssue(channelId, title, content, csn = null) {
   const acct = accounts.resolve(channelId);
   if (!acct) return { isn: null, error: null };
+  // [giip #1252] csn 이 인식되는 이 지점에서 실제 언어(tCorp.cLang)를 백그라운드로 조회해
+  // csn-lang-cache 를 채운다(fire-and-forget, 실패해도 무시 — 장애 유발 금지, 이 캐시는
+  // config.resolveLangForProject 가 project-lang.json 수동맵보다 우선 참조한다).
+  const effCsn = csn != null ? csn : (acct.csn != null ? acct.csn : null);
+  if (effCsn != null) require('./csn-lang-cache').prefetch(acct, effCsn).catch(() => {});
   const body = {
     title: (title || '(무제)').slice(0, 200),
     content: (content || title || '').slice(0, 8000),
