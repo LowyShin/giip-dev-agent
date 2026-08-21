@@ -20,3 +20,8 @@ slack-bot/.secrets/*
 
 # giip-1063: 비용 로그 / 재시도 checkpoint 등 런타임 산출물 (머신 로컬, 커밋 금지)
 .agent/runtime/
+
+# gissue 스케줄러 — 배포별 실제 CSN 매핑(경로/사설 정보 포함 가능)은 비커밋, .example 만 추적
+scripts/gissue/csn-projects.json
+scripts/gissue/logs/
+scripts/gissue/*.lock
