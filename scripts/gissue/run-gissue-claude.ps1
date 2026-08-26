@@ -44,6 +44,29 @@
 # 엔진: claude -p --dangerously-skip-permissions (컨펌 없이 끝까지 자율)
 #   2026-08-07: MINIMAX_API_KEY 있으면 MiniMax 우선 시도 → 실패/한도 시 같은 실행에서 즉시 claude 폴백
 #   (slack-bot 과 동일 우선순위 정책, MODEL_USAGE_SPEC.md 참고). 키 없으면 기존과 100% 동일.
+#   orphan 워크트리 자가정리(giip #1547, 2026-08-26 신설 — lowyworkenv 쪽 giip #1540/#1544 인시던트
+#   재발 방지 로직을 이 원본 레포로 이식): lowyworkenv/scripts/gissue/run-gissue-claude.ps1(giip #1544,
+#   커밋 bd5904b2)에서 완료된 이슈의 .worktrees/ 잔해(pnpm node_modules 등 매우 깊은 경로)가 Windows git
+#   "Filename too long"을 유발해 [F] AUTO-UNBLOCK stash -u 가 20,236회 반복 실패하며 CSN47 큐 전체가
+#   마비된 사고가 있었다. 이 레포(giip-fde-agent)의 run-gissue-claude.ps1 도 동일한 AUTO-UNBLOCK/stash -u
+#   구조([F], 위 참고)를 그대로 갖고 있어 같은 취약점에 노출될 수 있으므로, 스케줄러 자신이 각 CSN 처리마다
+#   (Phase 1 busy-wait 대기보다 먼저) `.worktrees/`(및 그 안 nested git 레포 각각의 `.worktrees/`)를 스캔해
+#   디렉토리명에서 `(?:isn|giip|issue)-?(\d+)` 정규식으로 이슈번호를 추출하고(매칭 안 되면 절대 안 건드림),
+#   `git worktree list --porcelain` 에 실제 등록된 정식 워크트리는 제외한 뒤, 남은 후보의 이슈 상태가
+#   DONE 이거나 이슈 자체가 존재하지 않고 디렉토리 최종수정시각이 24시간 이상 지난 것만(사람이 방금 끝낸
+#   작업을 아직 보고 있을 안전마진) robocopy 빈 폴더 `/MIR` 미러 트릭(Windows MAX_PATH 260자 제한 회피,
+#   lowyworkenv 인시던트 수동조치에서 실제로 쓴 방법)으로 비운 뒤 디렉토리 자체를 지운다.
+#   READY/PENDING/IN_PROGRESS/REVIEW/TESTED 는 절대 건드리지 않는다.
+#   [이식 시 이 레포 컨벤션에 맞춘 차이점] lowyworkenv 는 giipprj/giipdb\mgmt\execSQLFile.ps1 로 DB를 직접
+#   조회하지만, 이 레포는(위 "이슈 조회/코멘트/상태전이는 전부 giipfaw API 경유" 참고) DB 직접 접근 수단이
+#   없다 — 대신 lib/check-csn.js 가 이미 쓰는 GET {ApiBase}/giipIssues?isn=<isn> (x-api-key 인증) 패턴을
+#   재사용하는 신규 lib/get-isn-status.js 로 isn 목록의 상태를 순차 배치 조회한다(sk 는 giip-accounts.json
+#   기존 헬퍼 Get-GissueCsnSk 로 CSN 47 등 이 배포에 등록된 아무 csn 이나 사용 — sysadmin sk 는 csn 과
+#   무관하게 모든 isn 을 조회할 수 있음, get-issue.sh 상단 주석 참고). claude/MiniMax 세션을 띄우지 않는
+#   순수 PowerShell(+node) 기계적 로직이며, DB/API 조회·robocopy 실패 등 어떤 예외가 나도 try/catch 로
+#   감싸 경고 로그만 남기고 스케줄러 전체를 죽이지 않는다(Invoke-GissuePrGateSweep 등 기존 안전 실패
+#   처리 패턴과 동일 원칙). 구현: Get-GissueFdeIsnStatusMap/Remove-GissueOrphanWorktrees 함수(위
+#   Get-GissueBusyRepo 직후에 정의), lib/get-isn-status.js(신규 파일).
 # 매핑: csn-projects.json (CSN → 처리 프로젝트 폴더). 규칙 상세는 README.md.
 param(
     [switch]$DryRun,          # claude 미기동, 무엇을 실행할지 로그만
@@ -542,6 +565,119 @@ function Get-GissueBusyRepo($workdir, $restBranch = '') {
     return $null
 }
 
+# ── Orphan 워크트리 자가정리(giip #1547, lowyworkenv giip #1544 이식) ── 배경/근거는 파일 상단
+# giip #1547 변경이력 참고. isn 목록의 상태를 giipfaw API(GET {ApiBase}/giipIssues?isn=)로 배치
+# 조회한다(이 레포엔 DB 직접 접근이 없다 — get-issue.sh/lib/check-csn.js 와 동일 인증 경로 재사용).
+# csn 인자는 sk 선택(계정 매칭)에만 쓰인다 — sysadmin sk 는 csn 과 무관하게 모든 isn 을 조회할 수
+# 있으므로(get-issue.sh 상단 주석 참고), 워크트리 디렉토리명에 박힌 isn 이 이 CSN 소속이 아니어도
+# (예: 다른 CSN 이슈) 정확한 상태를 돌려받는다. 반환: isn(string) -> status(string) 해시테이블.
+# 조회 결과에 없는 isn 은 채워 넣지 않는다(호출측이 "이슈 없음"으로 해석).
+function Get-GissueFdeIsnStatusMap($root, $sk, $isnList) {
+    $result = @{}
+    $isnList = @($isnList | Where-Object { $_ -match '^\d+$' } | Select-Object -Unique)
+    if (-not $isnList -or -not $sk) { return $result }
+    try {
+        $isnCsv = ($isnList -join ',')
+        $rows = & node (Join-Path $root 'lib\get-isn-status.js') $ApiBase $sk $isnCsv 2>&1
+        foreach ($ln in @($rows)) {
+            $t = "$ln".Trim()
+            if (-not $t -or $t -notmatch '^\d+\|') { continue }
+            $parts = $t -split '\|', 2
+            if ($parts.Count -eq 2) { $result[$parts[0]] = $parts[1].Trim() }
+        }
+    } catch {}
+    return $result
+}
+
+# {PROJECT}(=$workdir) 및 그 안의 nested git 레포 각각의 `.worktrees/` 아래, git worktree 로 등록되지
+# 않은(=orphan plain) 디렉토리 중 완료(DONE)/존재하지 않는 이슈의 것만, 24시간 이상 경과한 경우에 한해
+# robocopy 빈 폴더 `/MIR` 미러 트릭으로 삭제한다. READY/PENDING/IN_PROGRESS/REVIEW/TESTED 는 대상에서
+# 완전히 제외한다(사람이 지금 그 워크트리에서 작업 중일 수 있음). 실패해도(API 조회 실패, robocopy 실패
+# 등) 이 함수 자체가 예외를 삼켜 경고 로그만 남기고 호출부(CSN 처리 루프)를 절대 막지 않는다.
+function Remove-GissueOrphanWorktrees($csn, $workdir) {
+    try {
+        $repoPaths = @(@($workdir) + (Get-GissueGitRepoPaths $workdir) | Select-Object -Unique)
+        $wtreeRoots = @()
+        foreach ($rp in $repoPaths) {
+            $cand = Join-Path $rp '.worktrees'
+            if (Test-Path -LiteralPath $cand) { $wtreeRoots += $cand }
+        }
+        $wtreeRoots = @($wtreeRoots | Select-Object -Unique)
+        if (-not $wtreeRoots) { return }  # .worktrees 자체가 없으면 조용히 스킵(로그 스팸 금지)
+
+        # 정식 등록된 git worktree 경로 수집(이 프로젝트 안의 모든 nested git 레포 대상) — 이건 절대 건드리지 않는다.
+        $registeredPaths = @()
+        foreach ($repo in ($repoPaths | Where-Object { Test-Path -LiteralPath (Join-Path $_ '.git') })) {
+            try {
+                $wtOut = git -C $repo worktree list --porcelain 2>$null
+                foreach ($line in @($wtOut)) {
+                    if ("$line" -match '^worktree\s+(.+)$') {
+                        $p = $Matches[1].Trim()
+                        $rp2 = try { (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path } catch { $p }
+                        $registeredPaths += $rp2
+                    }
+                }
+            } catch {}
+        }
+        $registeredPaths = @($registeredPaths | Select-Object -Unique)
+
+        $candidates = @()
+        foreach ($wroot in $wtreeRoots) {
+            foreach ($item in (Get-ChildItem -LiteralPath $wroot -Directory -ErrorAction SilentlyContinue)) {
+                # isn/giip/issue 세 접두어 뒤 숫자를 이슈번호로 인식(예: giipv3-isn1467-x, giipdb-isn1468-y,
+                # giip917-styleguide, hub-issue1008-actionflow). 매칭 안 되는 이름은 절대 건드리지 않고 스킵.
+                $m = [regex]::Match($item.Name, '(?:isn|giip|issue)-?(\d+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if (-not $m.Success) { continue }
+                $fullPath = try { (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).Path } catch { $item.FullName }
+                if ($registeredPaths -contains $fullPath) { continue }  # 정식 git worktree — orphan 아님, 제외
+                $candidates += [pscustomobject]@{ Path = $item.FullName; Isn = $m.Groups[1].Value; AgeHr = ((Get-Date) - $item.LastWriteTime).TotalHours }
+            }
+        }
+        if (-not $candidates) { return }
+
+        $sk = Get-GissueCsnSk $csn
+        if (-not $sk) {
+            Write-Log $csn "[ORPHAN-CLEANUP] SKIP: csn=$csn 의 sk 를 찾지 못함(giip-accounts.json) — isn 상태 조회 불가, 이번엔 건너뜀"
+            return
+        }
+        $statusMap = Get-GissueFdeIsnStatusMap $Root $sk ($candidates.Isn)
+
+        foreach ($c in $candidates) {
+            $status = $statusMap[$c.Isn]
+            $isDoneOrMissing = (-not $status) -or ($status -eq 'DONE')
+            if (-not $isDoneOrMissing) { continue }  # READY/PENDING/IN_PROGRESS/REVIEW/TESTED 등은 절대 건드리지 않음
+            $reasonNote = if ($status) { "$status 확인" } else { "이슈 없음(조회 결과 없음)" }
+            if ($c.AgeHr -lt 24) {
+                # [giip #1547 검증 중 실측] `$reasonNote이나`처럼 한글이 변수명 뒤에 바로 붙으면 PowerShell 이
+                # 한글도 포함한 하나의 변수명(예: `$reasonNote이나`, 미정의)으로 파싱해 조용히 빈 문자열이 되는
+                # 버그가 실행 확인됨(lowyworkenv 원본 giip #1544 코드에도 동일 패턴 존재) — `${reasonNote}`로 감싸 회피.
+                Write-Log $csn "[ORPHAN-CLEANUP] isn$($c.Isn) ${reasonNote}이나 최근 수정($([Math]::Round($c.AgeHr,1))h 전, 24h 미만) — 안전마진으로 이번엔 보류: $($c.Path)"
+                continue
+            }
+            if ($DryRun) {
+                Write-Log $csn "[ORPHAN-CLEANUP][DRY-RUN] isn$($c.Isn) $reasonNote, $([Math]::Round($c.AgeHr,1))h 경과 — 삭제 예정: $($c.Path)"
+                continue
+            }
+            try {
+                $emptyDir = Join-Path $env:TEMP ("gissue_orphanwt_empty_{0}" -f ([guid]::NewGuid().ToString('N')))
+                New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+                try {
+                    robocopy $emptyDir $c.Path /MIR /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                    if ($LASTEXITCODE -ge 8) { throw "robocopy exit $LASTEXITCODE" }
+                    Remove-Item -LiteralPath $c.Path -Recurse -Force -ErrorAction Stop
+                    Write-Log $csn "[ORPHAN-CLEANUP] isn$($c.Isn) $reasonNote, .worktrees/$(Split-Path -Leaf $c.Path) 삭제"
+                } finally {
+                    Remove-Item -LiteralPath $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            } catch {
+                Write-Log $csn "[ORPHAN-CLEANUP] WARN: $($c.Path) 삭제 실패 — $($_.Exception.Message)"
+            }
+        }
+    } catch {
+        Write-Log $csn "[ORPHAN-CLEANUP] WARN: orphan worktree 정리 중 예외 — $($_.Exception.Message)"
+    }
+}
+
 # ── Phase -1: 열린 PR 자동머지(merge-standing-prs) ──
 # 이 :07 실행의 가장 첫 동작으로, 아래 merge-standing-prs.ps1이 정의한 고정 7개 레포
 # (giipprj/giipv3, giipprj/giipdb, giipprj/giipfaw, lowyworkenv, giipprj, uamath,
@@ -693,6 +829,11 @@ foreach ($csn in $map.PSObject.Properties.Name) {
     $lock    = Join-Path $LogDir "gissue_csn$csn.lock"
 
     if (-not (Test-Path $workdir)) { Write-Log $csn "SKIP: workdir 없음 ($workdir)"; continue }
+
+    # orphan 워크트리 자가정리(giip #1547) — busy-wait/AUTO-UNBLOCK 로직보다 먼저, CSN마다 매번 수행
+    # (lowyworkenv giip #1544 와 동일 원칙 — 잔해가 stash -u 를 깨뜨리기 전에 먼저 치운다).
+    # DryRun 이든 아니든 항상 호출한다(읽기+판단은 항상 하고, 실제 삭제 여부만 함수 내부에서 $DryRun 으로 분기).
+    Remove-GissueOrphanWorktrees $csn $workdir
 
     # 다른 프로세스(slack-bot 등)가 이 workdir/nested repo 를 지금 쓰는 중인지(base 브랜치 아님) 확인 — 정보성.
     # 실제 대기(폴링)는 더 이상 여기서 포기하지 않고 잡 내부(아래 스크립트블록)에서 수행한다.

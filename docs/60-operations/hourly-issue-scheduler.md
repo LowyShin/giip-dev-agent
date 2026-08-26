@@ -112,7 +112,124 @@ powershell.exe -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass `
 등록 스크립트: `giip-fde-agent/scripts/register-hourly-issue-scheduler.ps1`(파라미터화된 Windows
 Task Scheduler 등록 스크립트, 이 문서의 §2~§3 스펙을 그대로 구현).
 
-## 8) 배포 절차(신규 CSN/PC — 복사만으로 이식)
+## 8) 등록 스크립트 상세 (`register-hourly-issue-scheduler.ps1`)
+
+`scripts/register-hourly-issue-scheduler.ps1`은 이 문서 §2~§3 스펙을 그대로 구현하는, 파라미터화된
+Windows Task Scheduler 등록/해제/확인 스크립트다. `-Action` 셋(기본값 `Status`) 3가지:
+
+- **`Register`**: `-RepoRoot`(필수 — 이 스케줄러 스크립트 세트를 배치한 오케스트레이션 레포 루트,
+  원본 배포는 `lowyworkenv`)를 받아 `-RunnerRelativePath`(기본
+  `scripts/gissue/run-gissue-claude.ps1`)와 조합해 실제 러너 경로를 확인(`Test-Path`, 없으면 즉시
+  에러)한 뒤, 다음을 등록한다:
+  - **Action**: `powershell.exe -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File
+    "<runner경로>"`
+  - **Trigger**: `-StartTime`(기본 `00:07:00`)에 1회 시작해 `-RepetitionMinutes`(기본 60분)마다
+    반복. `-RepetitionDuration`을 `[TimeSpan]::MaxValue`로 주면 ISO8601 직렬화 시 Task Scheduler
+    XML의 duration 상한을 넘어 등록 자체가 거부되므로(HRESULT 0x80041318, giip #1275 실측), 대신
+    `New-TimeSpan -Days 3650`(약 10년)으로 사실상 무기한 반복을 구현한다.
+  - **Settings**: `AllowStartIfOnBatteries`+`DontStopIfGoingOnBatteries`(배터리 전원과 무관하게
+    실행/지속), `StartWhenAvailable`(예정 시각에 PC가 꺼져 있었으면 켜지는 즉시 실행),
+    `MultipleInstances IgnoreNew`(이전 실행이 아직 끝나지 않았으면 새 트리거를 무시 — 스크립트
+    자체의 CSN별 age-based lock과는 별개의 이중 안전장치), `ExecutionTimeLimit`2시간(러너 자신의
+    `$RunTimeoutMin`=90분보다 넉넉하게 상한).
+  - **실행 계정**: 기본값은 현재 로그온 사용자(`$env:USERDOMAIN\$env:USERNAME`), `RunLevel Limited`.
+    `-Password`를 넘기면 PSCredential로 비밀번호 인증 등록을 해 그 계정이 로그오프 상태여도(재부팅
+    후 로그인 안 해도) 스케줄이 동작한다 — 넘기지 않으면 `Register-ScheduledTask`가 최초 등록 시
+    대화형 자격증명 프롬프트를 띄울 수 있어 무인 등록(원격 세션 등)에서는 걸릴 수 있다.
+  - **`-TaskName`**(기본 `GIIP_Gissue_Claude`): 같은 PC에 여러 배포를 동시에 등록하려면(예: 서로
+    다른 오케스트레이션 레포/CSN 세트) 배포마다 고유한 이름을 지정해야 한다 — 기본값 그대로 두 번
+    등록하면 `-Force`로 앞선 등록을 덮어쓴다.
+- **`Unregister`**: 해당 `-TaskName`의 태스크를 확인 프롬프트 없이(`-Confirm:$false`) 제거. 이미
+  없으면 에러 대신 안내 메시지만 출력(멱등).
+- **`Status`**(기본값, `-RepoRoot` 불필요): `Get-ScheduledTask`+`Get-ScheduledTaskInfo`로 태스크
+  이름·State·Enabled·등록된 Action 문자열·LastRunTime·LastTaskResult·NextRunTime을 한 번에 출력한다.
+
+## 9) 등록 확인 방법
+
+등록 스크립트의 `-Action Status`가 가장 빠른 확인 경로다:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-hourly-issue-scheduler.ps1 -Action Status -TaskName GIIP_Gissue_Claude
+```
+
+직접 표준 cmdlet으로 확인해도 동일하다:
+
+```powershell
+Get-ScheduledTask -TaskName GIIP_Gissue_Claude
+Get-ScheduledTaskInfo -TaskName GIIP_Gissue_Claude | Select-Object LastRunTime, LastTaskResult, NextRunTime
+```
+
+`LastTaskResult`가 `0`이면 프로세스 자체는 정상 종료됐다는 뜻이지만(러너 내부는 CSN별로 try/catch로
+감싸 개별 실패를 삼키므로 스크립트가 통째로 비정상 종료하는 경우는 드물다), **그것만으로 "이슈 처리가
+실제로 진행되고 있다"를 확인했다고 보지 말 것** — 등록/기동 성공과 실제 큐 처리 진행은 별개다. 반드시
+로그를 직접 열어 최근 사이클이 실제로 돌았는지 확인한다:
+
+```powershell
+Get-Content -Tail 20 -Encoding UTF8 .\scripts\gissue\logs\gissue_csn<CSN번호>.log
+```
+
+- `gissue_csn<N>.log`: `Write-Log`가 남기는 사람이 읽는 이벤트 로그. 정상 사이클이면 `START
+  (cwd=...)`로 시작해(잡이 실제로 기동됐다는 뜻) 잡 종료 시 `DONE`(또는 타임아웃 시 `TIMEOUT`류
+  메시지)으로 끝난다. `SKIP: ...`만 반복되면(workdir 없음/lock 미해제/스케줄러 비활성 등) 원인을
+  그 SKIP 사유 문자열에서 바로 확인할 수 있다.
+- `gissue_csn<N>.out.log`: claude/MiniMax 잡의 원시 stdout(프롬프트에 대한 실제 응답, 무엇을
+  처리했는지 서술). 이슈가 실제로 처리됐는지 세부를 보려면 여기를 본다.
+- `gissue_csn<N>.lock`: 실행 중 표시용 파일(내용은 PID). `$LockMaxAgeHr`(2시간)보다 오래됐으면 다음
+  실행이 stale로 간주해 자동 제거하고 이어서 실행한다 — 사람이 수동으로 지울 필요는 보통 없다.
+
+"최근 사이클이 실제로 새 코드로 돌았는지"까지 확인하려면(아래 §11 참고) 로그 타임스탬프가 최근
+`git log`/`git pull` 이후인지 대조한다.
+
+## 10) orphan `.worktrees` 자가정리 — 왜 존재하는가 (giip #1540/#1544/#1547)
+
+`run-gissue-claude.ps1`은 각 CSN 처리마다(Phase 1 busy-wait 대기보다 먼저) `Remove-GissueOrphanWorktrees`
+함수로 담당 프로젝트(+nested repo) 안의 `.worktrees/` 디렉터리를 스캔해, **git worktree로 정식
+등록되지 않은(orphan) + 이슈 상태가 DONE이거나 이슈 자체가 없는 + 24시간 이상 방치된** 디렉터리만
+안전하게 삭제한다. 존재 이유:
+
+- **giip #1540** (2026-08-26): lowyworkenv의 동일 러너에서, 이미 DONE 처리된 이슈의 `.worktrees/`
+  잔해 안에 orphan `node_modules`(pnpm 구조, 매우 깊은 경로)가 남아 있어 Windows git이
+  "Filename too long"을 반복 발생시켰다. 이 러너의 `[F]` orphan-stash 자동언블록(`stash -u`) 로직이
+  이 잔해를 건드릴 때마다 실패해, 그 실패가 **20,236회** 반복되며 CSN47 이슈 큐 전체가 완전히
+  마비됐다(어떤 이슈도 처리되지 못함).
+- **giip #1544**: 위 인시던트의 재발 방지로, lowyworkenv 쪽 러너 자신에게 이 결정적(비-LLM)
+  PowerShell 정리 로직을 추가했다(`Get-GissueIsnStatusMap`/`Remove-GissueOrphanWorktrees`, DB
+  직접 조회 경로 사용).
+- **giip #1547** (이 변경): 이 레포(`giip-fde-agent`)의 `run-gissue-claude.ps1`도 동일한
+  `[F]`/`stash -u`/AUTO-UNBLOCK 구조를 그대로 갖고 있어 같은 취약점에 노출될 수 있으므로, 원본
+  레포 자신에도 동일 취지의 방어 로직을 이식했다. 이 레포는 DB 직접 접근이 없어(§4 참고), isn 상태
+  조회를 giipfaw API(`scripts/gissue/lib/get-isn-status.js`, 신규)로 대체한 것이 lowyworkenv 판과의
+  유일한 구조적 차이다.
+
+READY/PENDING/IN_PROGRESS/REVIEW/TESTED 상태의 이슈에 연결된 워크트리, 그리고 `git worktree list`에
+정식 등록된 워크트리는 이 로직이 **절대** 건드리지 않는다 — 사람이 지금 그 워크트리에서 작업 중일 수
+있기 때문이다. 삭제 자체도 Windows `MAX_PATH`(260자) 제한을 우회하기 위해 robocopy 빈 폴더 `/MIR`
+미러 트릭을 쓴다(`Remove-Item` 단독으로는 깊은 pnpm 경로 등에서 실패할 수 있다 — 이번 인시던트 수동
+조치에서 실제로 쓴 방법). 실행 로그에서 `[ORPHAN-CLEANUP]` 접두어로 필터링하면 무엇을 왜 지웠는지(또는
+왜 보류했는지) 바로 확인할 수 있다.
+
+## 11) 운영 함정 — **PR 머지 ≠ 스케줄러가 새 코드로 도는 것** (반드시 숙지)
+
+**GitHub에서 PR을 머지해도, Windows Task Scheduler가 실제로 실행하는 파일은 그 태스크가 가리키는
+로컬 워킹카피(§8 등록 시의 `-RepoRoot`/`-RunnerRelativePath`가 가리키는 로컬 경로)다.** 원격
+`main`이 갱신됐다는 사실 자체는 로컬 체크아웃에 아무 영향을 주지 않는다 — **그 로컬 디렉터리에서
+`git pull`을 실행하기 전까지, 스케줄러는 다음 `:07` 사이클에도, 그 다음 사이클에도 계속 머지 전 옛
+코드로 돈다.** CI가 green이고 PR이 머지됐다는 사실만으로 "다음 실행부터는 반영됐겠지"라고 가정하지
+말 것.
+
+**실제 사고 사례(2026-08-26, lowyworkenv)**: giip #1544(위 §10의 orphan-worktree 정리 fix) PR을
+GitHub에서 머지했지만, 그 PR을 병합한 세션이 로컬 `lowyworkenv` 체크아웃에서 `git pull`을 깜빡했다.
+그 결과 **11:07 사이클이 머지된 새 코드가 아니라 머지 전 옛 코드로 그대로 실행됐다** — 스케줄러
+자신은 아무 에러도 내지 않고 "정상적으로" 옛 로직을 돌렸을 뿐이라, 로그만 봐서는 문제를 알아채기
+어렵다(태스크 State/LastTaskResult 모두 정상으로 보인다).
+
+**따라서: 이 스케줄러가 실행하는 스크립트(`run-gissue-claude.ps1` 자신, 또는 그것이 참조하는
+`lib/*.js`, 프롬프트 템플릿 등)를 수정하는 PR을 머지한 뒤에는, 그 즉시 해당 로컬 체크아웃에서
+`git pull`까지 실행해야 다음 `:07` 사이클부터 실제로 반영된다.** PR 머지만으로 배포가 끝났다고
+보고하지 말 것 — `git pull` 완료(그리고 가능하면 `git log -1`로 반영된 커밋 해시 확인)까지가 "이
+변경이 실제로 스케줄러에 배포됐다"의 완료 정의다.
+
+## 12) 배포 절차(신규 CSN/PC — 복사만으로 이식)
 
 이 레포 자체가 이제 실행 가능한 구현체입니다(스펙 문서만이 아님). 새 프로젝트/PC에 이식하려면:
 
@@ -131,7 +248,7 @@ Task Scheduler 등록 스크립트, 이 문서의 §2~§3 스펙을 그대로 �
 자주 쓰는 저장소라면, 스케줄러 전용 별도 clone을 workdir로 쓰는 것을 권장한다(원본 저장소와는 git
 remote로만 연결된, 완전히 독립적인 워킹트리).
 
-## 8) 연결 문서
+## 13) 연결 문서
 
 - KPI 표준: `./ai-native-kpi.md`
 - 장애/롤백 플레이북: `./incident-rollback-playbook.md`
