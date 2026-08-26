@@ -572,13 +572,20 @@ function Get-GissueBusyRepo($workdir, $restBranch = '') {
 # 있으므로(get-issue.sh 상단 주석 참고), 워크트리 디렉토리명에 박힌 isn 이 이 CSN 소속이 아니어도
 # (예: 다른 CSN 이슈) 정확한 상태를 돌려받는다. 반환: isn(string) -> status(string) 해시테이블.
 # 조회 결과에 없는 isn 은 채워 넣지 않는다(호출측이 "이슈 없음"으로 해석).
-function Get-GissueFdeIsnStatusMap($root, $sk, $isnList) {
+function Get-GissueFdeIsnStatusMap($root, $sk, $csn, $isnList) {
     $result = @{}
     $isnList = @($isnList | Where-Object { $_ -match '^\d+$' } | Select-Object -Unique)
     if (-not $isnList -or -not $sk) { return $result }
     try {
         $isnCsv = ($isnList -join ',')
         $rows = & node (Join-Path $root 'lib\get-isn-status.js') $ApiBase $sk $isnCsv 2>&1
+        # giip #1547 FINAL-REVIEW: get-isn-status.js 가 오류 시 exit 1을 반환하므로, LASTEXITCODE가
+        # 0이 아니면 조회 실패(네트워크/타임아웃/파싱 오류) — 활성 worktree를 "이슈 없음"으로 오해해
+        # 삭제하는 것을 방지하기 위해 빈 result를 반환(정리 단계 안전 중단).
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log $csn "[ORPHAN-CLEANUP] SKIP: get-isn-status.js 조회 실패(exit=$LASTEXITCODE) — 활성 worktree 안전 보호"
+            return $result
+        }
         foreach ($ln in @($rows)) {
             $t = "$ln".Trim()
             if (-not $t -or $t -notmatch '^\d+\|') { continue }
@@ -640,7 +647,7 @@ function Remove-GissueOrphanWorktrees($csn, $workdir) {
             Write-Log $csn "[ORPHAN-CLEANUP] SKIP: csn=$csn 의 sk 를 찾지 못함(giip-accounts.json) — isn 상태 조회 불가, 이번엔 건너뜀"
             return
         }
-        $statusMap = Get-GissueFdeIsnStatusMap $Root $sk ($candidates.Isn)
+        $statusMap = Get-GissueFdeIsnStatusMap $Root $sk $csn ($candidates.Isn)
 
         foreach ($c in $candidates) {
             $status = $statusMap[$c.Isn]
