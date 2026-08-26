@@ -94,9 +94,16 @@ function Register-HourlyTask {
         -RepetitionInterval (New-TimeSpan -Minutes $RepetitionMinutes) `
         -RepetitionDuration (New-TimeSpan -Days 3650)
 
+    # 주의(giip #1562, 2026-08-26 실측): MultipleInstances=IgnoreNew였을 때, 느린 CSN(예: csn 47) 하나
+    # 때문에 한 인스턴스가 ExecutionTimeLimit(2시간)까지 살아있는 동안 다음 정기 트리거(들)가 "이전
+    # 인스턴스 실행 중"이라는 이유로 통째로 스킵됐다(이벤트 ID 322) — 그 결과 csn 47과 무관한 다른 모든
+    # CSN(2, 33, 70335, 70374 등)의 처리까지 몇 시간씩 동반 정지됐다. 각 CSN은 이미 자체 파일 락
+    # (run-gissue-claude.ps1의 logs\gissue_csn<N>.lock, 2시간 초과 시 stale 자동제거)으로 "같은 CSN을
+    # 여러 인스턴스가 동시 처리"하는 것을 막고 있으므로, 그 전제 하에 Parallel로 전환해 새 트리거가
+    # 통째로 스킵되지 않고(느린 CSN과 무관한 다른 CSN은) 정상 진행되도록 한다.
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew `
+        -StartWhenAvailable -MultipleInstances Parallel `
         -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
     $registerArgs = @{
