@@ -129,9 +129,19 @@ Windows Task Scheduler 등록/해제/확인 스크립트다. `-Action` 셋(기�
     `New-TimeSpan -Days 3650`(약 10년)으로 사실상 무기한 반복을 구현한다.
   - **Settings**: `AllowStartIfOnBatteries`+`DontStopIfGoingOnBatteries`(배터리 전원과 무관하게
     실행/지속), `StartWhenAvailable`(예정 시각에 PC가 꺼져 있었으면 켜지는 즉시 실행),
-    `MultipleInstances IgnoreNew`(이전 실행이 아직 끝나지 않았으면 새 트리거를 무시 — 스크립트
-    자체의 CSN별 age-based lock과는 별개의 이중 안전장치), `ExecutionTimeLimit`2시간(러너 자신의
+    `MultipleInstances Parallel`(여러 인스턴스 동시 실행 허용), `ExecutionTimeLimit`2시간(러너 자신의
     `$RunTimeoutMin`=90분보다 넉넉하게 상한).
+
+    **`MultipleInstances Parallel`로 바꾼 이유(giip #1562, 2026-08-26 실측 사고)**: 원래
+    `IgnoreNew`였는데, csn 47(백로그 큼) 처리가 오래 걸려 16:07 인스턴스가 2시간 가까이 살아있는 동안
+    17:07/18:07 정기 트리거가 "이전 인스턴스 실행 중"이라는 이유로 통째로 스킵됐다(이벤트 ID 322,
+    18:07:05에 ExecutionTimeLimit 초과로 강제 종료 — 이벤트 ID 329). 오케스트레이터가 CSN별로
+    Start-Job을 띄우고 전체 job이 끝날 때까지 기다리는 구조라, 하나의 태스크 인스턴스가 가장 느린 CSN
+    하나 때문에 몇 시간씩 살아있으면 그동안 csn 47과 무관한 다른 모든 CSN(2, 33, 70335, 70374 등)의
+    정기 처리까지 함께 멈췄다. 각 CSN은 이미 자체 파일 락(§9의 `gissue_csn<N>.lock`, 2시간 초과 시
+    stale 자동제거)으로 "같은 CSN을 여러 인스턴스가 동시 처리"하는 것을 막고 있다는 전제 하에,
+    `Parallel`로 바꿔 다음 트리거가 통째로 스킵되지 않도록 했다 — CSN별 중복 처리 방지는 계속 그
+    파일 락이 담당한다.
   - **실행 계정**: 기본값은 현재 로그온 사용자(`$env:USERDOMAIN\$env:USERNAME`), `RunLevel Limited`.
     `-Password`를 넘기면 PSCredential로 비밀번호 인증 등록을 해 그 계정이 로그오프 상태여도(재부팅
     후 로그인 안 해도) 스케줄이 동작한다 — 넘기지 않으면 `Register-ScheduledTask`가 최초 등록 시
