@@ -11,10 +11,11 @@
  * 실용적으로 충분하다).
  *
  * 사용: node get-isn-status.js <apiBase> <sk> <isn1,isn2,...>
- * stdout: 조회에 성공한 isn 만 "isn|status" 한 줄씩(순서 무관). 조회 실패/파싱 실패 isn 은 아무
- * 것도 출력하지 않는다(호출측이 "이슈 없음"으로 해석 — lowyworkenv 의 Get-GissueIsnStatusMap 과
- * 동일 컨벤션).
- * 종료코드: 항상 0(가용성 우선 — 개별 isn 조회 실패가 나머지 조회를 막지 않는다).
+ * stdout: 조회에 성공한 isn 만 "isn|status" 한 줄씩(순서 무관). 조회 실패/파싱 실패 isn 은
+ * stderr 로 "ERROR: <isn>: <원인>" 출력 후 전체를 실패로 처리한다.
+ * 종료코드: 모든 isn 조회 성공 시 0, 조회 실패(네트워크 오류/시간초과/파싱실패)가 1건이라도 있으면 1.
+ *   호출측 PowerShell(Get-GissueFdeIsnStatusMap)은 이 종료코드를 확인해, 실패 시 전체 정리를
+ *   중단한다(단순 "이슈 없음"으로 오해해 활성 이슈 worktree를 삭제하는 것을 방지 — giip #1547 FINAL-REVIEW).
  */
 const https = require('https');
 const { URL } = require('url');
@@ -22,7 +23,7 @@ const { URL } = require('url');
 const [, , apiBase, sk, isnCsv] = process.argv;
 if (!apiBase || !sk || !isnCsv) {
   console.error('사용법: node get-isn-status.js <apiBase> <sk> <isn1,isn2,...>');
-  process.exit(0);
+  process.exit(1);
 }
 
 const isnList = [...new Set(
@@ -40,26 +41,39 @@ function fetchStatus(isn) {
           const j = JSON.parse(data);
           const issue = j.issue || j;
           if (issue && issue.status) {
-            resolve(`${isn}|${issue.status}`);
+            resolve({ ok: true, line: `${isn}|${issue.status}` });
             return;
           }
         } catch (e) {
-          // 파싱 실패 — 아래 resolve(null)로 "이슈 없음/조회 불가"와 동일하게 처리
+          // 파싱 실패 — 실패로 처리
         }
-        resolve(null);
+        console.error(`ERROR: ${isn}: parse_error`);  // giip #1547 FINAL-REVIEW
+        resolve({ ok: false, isn });
       });
     });
-    req.on('error', () => resolve(null));
-    req.setTimeout(30000, () => { req.destroy(); resolve(null); });
+    req.on('error', (err) => {
+      console.error(`ERROR: ${isn}: ${err.message}`);  // giip #1547 FINAL-REVIEW
+      resolve({ ok: false, isn });
+    });
+    req.setTimeout(30000, () => {
+      req.destroy();
+      console.error(`ERROR: ${isn}: timeout`);  // giip #1547 FINAL-REVIEW
+      resolve({ ok: false, isn });
+    });
   });
 }
 
 (async () => {
+  let hasFailure = false;
   for (const isn of isnList) {
     // 배치 엔드포인트가 없어 순차 처리 — 후보 수가 많아지면 병렬화 고려(현재는 불필요).
     // eslint-disable-next-line no-await-in-loop
-    const line = await fetchStatus(isn);
-    if (line) console.log(line);
+    const result = await fetchStatus(isn);
+    if (result.ok) {
+      console.log(result.line);
+    } else {
+      hasFailure = true;  // 조회 실패가 1건이라도 있으면 exit 1 (giip #1547 FINAL-REVIEW)
+    }
   }
-  process.exit(0);
+  process.exit(hasFailure ? 1 : 0);
 })();
