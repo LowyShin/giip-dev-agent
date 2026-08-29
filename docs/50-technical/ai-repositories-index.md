@@ -24,7 +24,7 @@ AI 에이전트 시스템과 연동하거나 활용할 수 있는 외부 유용�
 
 ### [paperthin](https://github.com/LilMGenius/paperthin)
 - **한줄 소개**: 아티팩트를 "깨끗하고 참되게(clean & true)" 유지하는 에이전트-불문 저수준 마크다운 스킬 모음(re0/shower/factchk/ssotchk/hate 등)으로, DRY·에고리스 프로그래밍·fail-fast 같은 엔지니어링 지혜를 에이전트의 자발적 반사동작으로 만듭니다.
-- **적용 상태**: 본 레포 `.agent/skills/`에 14종 이식 완료 (출처·목록: [`.agent/skills/PAPERTHIN_NOTICE.md`](../../.agent/skills/PAPERTHIN_NOTICE.md))
+- **적용 상태**: 핵심 agentic design pattern을 GIIP Role/Rule 체계에 통합 + 원본 Skill 일부 이식 — 신규 Skill 0개 (출처·매핑: [`.agent/skills/PAPERTHIN_NOTICE.md`](../../.agent/skills/PAPERTHIN_NOTICE.md))
 
 ### [keep-codex-fast](https://github.com/vibeforge1111/keep-codex-fast)
 - **한줄 소개**: Codex의 로컬 상태(오래된 채팅·워크트리·로그·비대해진 SQLite 메타데이터)를 **백업 우선**으로 점검·정리해 성능을 유지하는 스킬입니다. inspect/maintain/repair 3모드와 "삭제 대신 아카이브, 핸드오프 먼저" 원칙을 따릅니다(MIT).

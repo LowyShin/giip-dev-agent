@@ -1,8 +1,8 @@
 # Paperthin 스킬 이식 출처 (Attribution)
 
-이 디렉토리의 아래 스킬들은 **[LilMGenius/paperthin](https://github.com/LilMGenius/paperthin)** (MIT License, Copyright © 2026 LilMGenius) 에서 이식(verbatim)했습니다. paperthin은 "아티팩트를 깨끗하고 참되게(clean & true)" 유지하는 에이전트-불문 저수준 스킬 모음입니다.
+이 디렉토리의 아래 스킬들은 **[LilMGenius/paperthin](https://github.com/LilMGenius/paperthin)** (MIT License, Copyright © 2026 LilMGenius) 에서 이식했습니다. paperthin은 "아티팩트를 깨끗하고 참되게(clean & true)" 유지하는 에이전트-불문 저수준 스킬 모음입니다.
 
-## 이식한 스킬 (14)
+## 1. Verbatim imported (원본 기반 이식)
 
 | 스킬 | 한줄 설명 | 유형 |
 |---|---|---|
@@ -21,10 +21,31 @@
 | `flywheel` | build→QA→retro→re0-work 루프로 코드가 아닌 학습을 누적 | model |
 | `nba` | 현재 사이클 상태를 읽어 단 하나의 다음 최선 행동 반환 (읽기전용) | model |
 
-## 이식하지 않은 스킬
+## 2. Adapted into GIIP (패턴만 이식, 신규 Skill 없음)
 
-- **`retro`** — 이 레포에는 이미 gstack + K-Layer 통합형 `retro`가 존재하여 덮어쓰지 않았습니다. `flywheel`의 retro 단계는 기존 `retro`가 담당합니다.
-- **`ppt-upgrade`** — paperthin의 `npx skills` 설치 재조정 전용이라 이 환경과 무관하여 제외했습니다.
+| 원본 | 통합 위치 | 내용 |
+|---|---|---|
+| `readchk`, `aim` | `.agent/rules/32_request_comprehension.md` | 요청 해석 검증 강화 |
+| `debloat`, `detool`, `reorder` | `.agent/rules/33_artifact_hygiene.md` | 아티팩트 위생 규칙 강화 |
+| `macrothink` | `.agent/roles/analyst.md` + `.agent/roles/orchestrator.md` | 해결책 먼저 제시 시 문제 분리 패턴 |
+| `prism` | `.agent/roles/orchestrator.md` + `.agent/roles/design-validator.md` | 다중 Role 결과 종합 패턴 |
+| `feynman` | `.agent/roles/design-validator.md` | 설계 검증 질문 패턴 |
+| `catchup` | `.agent/roles/orchestrator.md` + `.agent/roles/pdca-iterator.md` | 장기 작업 복구 패턴 |
+
+## 3. Intentionally not imported (의도적 미이식)
+
+| 항목 | 이유 |
+|---|---|
+| `modelchk` | GIIP Agent의 execution routing 범위와 맞지 않음 |
+| `re0-plan` | 기존 PDCA/K-Layer와 중복 |
+| `re0-loop` | 기존 PDCA/K-Layer와 중복 |
+| `re0-memo` | 기존 K-Layer와 중복 |
+| `re0-work` | 기존 work_history/K-Layer와 중복 |
+| `re0-git` | 기존 Git/commit 운영 방식과 중복 |
+| `re0-release` | 기존 배포 운영 방식과 중복 |
+| `re0-merge` | 기존 PR/병합 운영 방식과 중복 |
+| `retro` | 이 레포에는 이미 gstack + K-Layer 통합형 `retro`가 존재하여 덮어쓰지 않음 |
+| `ppt-upgrade` | paperthin의 `npx skills` 설치 재조정 전용이라 이 환경과 무관하여 제외 |
 
 ## MIT 라이선스 고지
 

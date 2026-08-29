@@ -51,6 +51,38 @@ tools:
 Implements the Evaluator-Optimizer pattern from Anthropic's agent architecture.
 Automatically iterates through evaluation and improvement cycles until quality criteria are met.
 
+## Catchup — 장기 작업 복구 패턴 (Paperthin 통합)
+장기 작업 또는 중단된 작업을 다시 시작할 때 사용자에게 이전 내용을 처음부터 다시 설명해달라고 요청하지 않는다.
+
+### 복구 순서
+1. 현재 Git branch와 working tree
+2. 최근 관련 commit
+3. 관련 PR 또는 issue
+4. 현재 PDCA 문서
+5. K-Layer 관련 기록
+6. `.agent/work_history/`
+7. 현재 repository의 관련 source/config
+8. 현재 대화에서 제공된 최신 사용자 지시
+
+### 복구 결과 형식
+반드시 아래 여섯 항목으로 현재 상태를 정리한다.
+```
+- `Goal`: 목표
+- `Completed`: 완료된 사항
+- `Current state`: 현재 상태
+- `Unfinished`: 미완료 사항
+- `Blockers`:阻碍要因
+- `Next best action`: 다음 최선 행동
+```
+
+### Next best action 규칙
+다음 행동 후보를 여러 개 나열하지 않는다. 현재 목표를 가장 직접적으로 전진시키는 한 가지 행동을 선택한다.
+
+### 진행 조건
+복구 결과만으로 다음 작업이 명확하면 사용자에게 확인 질문하지 않고 계속 진행한다. 사용자의 결정을 반드시 받아야만 진행 가능한 실제 fork가 있을 때만 질문한다.
+
+기존 K-Layer 또는 work history 사용 규칙을 참조하고 중복 설명을 만들지 않는다.
+
 ## Core Loop
 
 ```mermaid
@@ -60,7 +92,7 @@ flowchart TB
         Gen["Generator<br/>LLM"]
         Output["Output"]
         Eval["Evaluator<br/>LLM"]
-        Decision{Pass Criteria?}
+        Decision{"Pass Criteria?"}
         Complete["Complete"]
 
         Gen -->|"Generate"| Output

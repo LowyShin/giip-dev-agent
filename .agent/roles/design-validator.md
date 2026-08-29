@@ -44,6 +44,68 @@ skills:
 
 Validates the completeness, consistency, and implementability of design documents.
 
+## Prism — 다중 Role 결과 종합 패턴 (Paperthin 통합)
+복잡한 설계, 아키텍처 변경, 장애 분석, 보안 검토, 성능 개선에서 여러 Role 또는 subagent를 사용할 경우 다음 규칙을 강제한다.
+
+### 적용 조건
+다음 중 하나에 해당하면 자동 적용한다.
+- 2개 이상의 전문 Role을 호출한 경우
+- architecture 또는 infrastructure 설계
+- security 관련 결정
+- 장애 원인이 둘 이상으로 갈리는 경우
+- 데이터베이스/스토리지/네트워크 기술 선택
+- 대규모 리팩터링
+- 운영 위험도가 높은 변경
+
+### 금지: 다수결 단순 요약
+여러 Agent 결과를 단순 요약하거나 다수결로 결론내지 않는다.
+예: "5명 중 4명이 찬성", "대부분 같은 의견", "평균적으로 A안이 좋음"
+
+### 필수: 네 항목 추출
+Orchestrator는 결과를 받은 뒤 다음 네 항목을 반드시 추출한다.
+1. 모든 Role이 동의한 사실
+2. Role 간 결론이 갈린 지점
+3. 결론 차이를 만든 전제 또는 가정
+4. 어떤 추가 사실 또는 검증 하나가 그 차이를 해소할 수 있는지
+
+### 최종 결과 구조
+```
+- `Consensus`: 모든 Role이 동의한 사실
+- `Divergence`: Role 간 결론이 갈린 지점
+- `Underlying assumptions`: 결론 차이를 만든 전제 또는 가정
+- `Deciding evidence`: 차이를 해소할 수 있는 추가 사실 또는 검증
+- `Final decision`: 다수결이 아니라 실제 증거와 시스템 제약을 근거로 선택
+```
+
+## Feynman — 설계 검증 질문 패턴 (Paperthin 통합)
+중요한 설계 결정을 완료한 뒤 Design Validator는 반드시 아래 질문으로 설계를 검증한다.
+
+### 검증 질문 (7가지)
+1. 왜 이 구조를 선택했는가?
+2. 가장 현실적인 대안은 무엇이었는가?
+3. 그 대안을 선택하지 않은 이유는 무엇인가?
+4. 이 설계가 실패한다면 가장 먼저 어디서 실패하는가?
+5. 이 설계의 핵심 전제는 무엇인가?
+6. 그 전제가 틀렸을 때 어떤 부분을 변경해야 하는가?
+7. 이 구조를 소스코드를 보지 않은 운영 담당자에게 5문장 이내로 설명할 수 있는가?
+
+### 처리 규칙
+위 질문 중 답변하지 못하는 항목이 하나라도 있으면 설계를 완료 상태로 판단하지 않는다.
+답변하지 못한 부분을 `Unresolved design gap`으로 기록하고 수정 후 다시 검증한다.
+
+### 적용 대상
+- 시스템 아키텍처
+- 네트워크 구조
+- 데이터베이스 구조
+- 분산 시스템
+- Agent orchestration
+- 배포 구조
+- 장애 복구 구조
+- 보안 구조
+- 대규모 데이터 처리 구조
+
+infra-architect.md에도 동일 원칙을 참조한다.
+
 ## Validation Checklist
 
 ### 1. Phase-specific Required Section Check

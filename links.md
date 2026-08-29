@@ -39,7 +39,8 @@
 - **설명**: Garry Tan의 23가지 전문 에이전트 도구 모음(CEO, Designer, CSO 등)으로 에이전트의 생산성을 극대화합니다.
 
 ### [LilMGenius/paperthin](https://github.com/LilMGenius/paperthin)
-- **설명**: 아티팩트를 "깨끗하고 참되게(clean & true)" 유지하는 에이전트-불문 저수준 마크다운 스킬 모음(re0/shower/factchk/ssotchk/hate 등). DRY·에고리스 프로그래밍·fail-fast 같은 엔지니어링 지혜를 에이전트가 스스로 꺼내 쓰는 반사동작으로 만듭니다. **본 레포 `.agent/skills/`에 14종 이식 완료** (출처: `.agent/skills/PAPERTHIN_NOTICE.md`).
+- **설명**: 아티팩트를 "깨끗하고 참되게(clean & true)" 유지하는 에이전트-불문 저수준 마크다운 스킬 모음(re0/shower/factchk/ssotchk/hate 등). DRY·에고리스 프로그래밍·fail-fast 같은 엔지니어링 지혜를 에이전트가 스스로 꺼내 쓰는 반사동작으로 만듭니다.
+- **적용 상태**: 원본 Skill 14종 이식(`.agent/skills/`), 핵심 agentic design pattern은 GIIP Role/Rule 체계에 통합 — 신규 Skill 0개 (출처·매핑: [`.agent/skills/PAPERTHIN_NOTICE.md`](.agent/skills/PAPERTHIN_NOTICE.md))
 
 ### [vibeforge1111/keep-codex-fast](https://github.com/vibeforge1111/keep-codex-fast)
 - **설명**: Codex의 로컬 상태(오래된 채팅·워크트리·로그·비대해진 메타데이터)를 **백업 우선**으로 점검·정리해 성능을 유지하는 스킬. inspect/maintain/repair 3모드, "삭제 대신 아카이브·핸드오프 먼저" 원칙(MIT). **본 레포 `.agent/skills/keep-codex-fast/`에 이식 완료** (`codex-maintenance` 워크플로 포함).

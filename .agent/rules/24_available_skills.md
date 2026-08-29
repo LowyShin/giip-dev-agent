@@ -78,10 +78,23 @@ This document summarizes the available skills and commands in the GIIP Agent sys
 
 ## Paperthin 핵심 기능 연계 (신규 명령 추가 없음)
 
-다음 요구는 기존 명령 체계에 연결해 실행한다.
+Paperthin의 모든 패턴은 **별도 신규 Skill/Command 없이** 기존 Role과 Rule에 통합되었다.
+
+### 패턴 매핑
+
+| 패턴 | 연결 대상 |
+|---|---|
+| prism | multi-role orchestration |
+| macrothink | architecture/technology/problem analysis |
+| feynman | design validation |
+| catchup | resume/PDCA continuation |
+| readchk/aim | 요청 해석 검증 (32_request_comprehension.md) |
+| debloat/detool/reorder | 아티팩트 위생 (33_artifact_hygiene.md) |
+
+### 기존 명령 체계 활용
 
 - 요청 해석 검증 (Request comprehension): `/pdca plan`, `/pdca design`, `/pdca status` 단계에서 `understood as:` 기록 및 모호성 확인
 - 반대 관점 검토 (Adversarial review): `/cso`, `/ceo-review`, `/code-review`와 아키텍트·SRE 서브에이전트 조합 사용
 - 중단 작업 복귀 (Resume long tasks): `/k-layer search`, Git 변경/커밋, PDCA 문서, Slack 대화를 함께 확인 후 재개 요약 생성
 
-> 금지: Paperthin 전역 설치, 자동 업데이트, `re0-*`, `modelchk` 계열 중복 명령 도입
+> 금지: Paperthin 전역 설치, 자동 업데이트, `/prism`, `/macrothink`, `/feynman`, `/catchup` 명령 도입

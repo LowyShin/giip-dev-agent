@@ -24,7 +24,12 @@
                         "id":  "msitarzewski-agency-agents",
                         "url":  "https://github.com/msitarzewski/agency-agents",
                         "description":  "A complete AI agency - specialized experts with personality and processes"
+                    },
+                    {
+                        "id":  "lilmgenius-paperthin",
+                        "url":  "https://github.com/LilMGenius/paperthin",
+                        "description":  "Paperthin - agent skill patterns (upstream change detection only)"
                     }
                 ],
-    "lastUpdate":  "2026-05-16T15:30:00Z"
+    "lastUpdate":  "2026-08-29T14:00:00Z"
 }
