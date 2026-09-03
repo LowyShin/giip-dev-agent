@@ -12,7 +12,8 @@
 #                        찾아 로컬 재검증(exit 0) 후에만 수정 push. 봇이 validation 에러난 채 PR 만든 사고 상시 방지.
 #   - REVIEW 재검증([G], giip #989, 2026-08-09 신설): 이슈 유무와 무관하게, REVIEW 이슈 중 아직 재검증 안 된
 #                        것만 Actionflow 로 재테스트해 SUCCESS 면 새 상태 TESTED 로 전이(DONE 으로 자동 전이는
-#                        안 함 — 최종 종결은 사람 판단). 정본: giipprj\.agent\rules\PROTOCOL_ACTIONFLOW_TEST_GATE.md.
+#                        안 함 — 최종 종결은 사람 판단). Actionflow 테스트 게이트 규칙은 이 레포 자체 문서로
+#                        관리한다(giip-fde-agent가 다른 프로젝트 폴더를 직접 읽지 않음, giip #1966).
 #   - 다른 프로세스 점유 시 대기, 30분 예산(2026-07-28 강화): workdir/nested repo 가 base 브랜치가 아니면(다른
 #     프로세스 사용 중) 그 자리에서 포기하지 않고, 잡 내부에서 주기적으로 재확인하며 최대 $WaitBudgetMin(30분)
 #     대기하다가 해제되면 바로 이어서 처리한다(아래 Get-GissueBusyRepo 참고). 예산을 넘기면 그냥 조용히 포기하지

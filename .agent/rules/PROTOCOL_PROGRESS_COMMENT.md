@@ -1,7 +1,7 @@
-# 진행 상황을 giip issue 코멘트로 자주 남긴다 (Progress Comment) — 미러
+# 진행 상황을 giip issue 코멘트로 자주 남긴다 (Progress Comment)
 
-> **정본(SSOT)**: `giipprj/.agent/rules/PROTOCOL_PROGRESS_COMMENT.md`. 이 파일은 giip-fde-agent 연동용 미러다(동기화 대상).
-> 2026-07-30: giip-813 인시던트(다중 레포 PR을 몰아서 보고) 조사 중 이 레포엔 미러 자체가 없던 것을 발견해 신설.
+> giip-fde-agent(csn 70424) 자체의 정본(SSOT) 규칙 문서다. 다른 프로젝트의 사본이나 동기화 대상이 아니다.
+> 2026-07-30: giip-813 인시던트(다중 레포 PR을 몰아서 보고) 조사 중 이 레포엔 이 규칙 자체가 없던 것을 발견해 신설.
 
 ## 전제 (Gate)
 - **giip issue API 접근 가능 + 작업 중인 이슈 번호(isn)를 알 때만** 적용. **isn 미상/미연동이면 전량 조용히 스킵.**
@@ -48,9 +48,10 @@
 1a. **추가 로드(착수 이후)**: 처리 도중 착수 시점에 없던 role/rule/skill/workflow 파일을 새로 열어
    참고하게 되면 그 즉시 별도 코멘트로 "추가 로드: <파일 경로> — <왜 필요해졌는지>"를 남긴다. 착수
    코멘트에 몰아서 사후 기재하지 않는다.
-   (giip #1244 후속, 2026-08-19 — giipprj/.agent/rules/PROTOCOL_PROGRESS_COMMENT.md(정본) 강화 내용
-   동기화. 배경: giip #1202에서 role/rule 파일을 실제로 읽었는지조차 불명확한 채 "DB 접속정보 없음"
-   같은 거짓 결론이 giipprj 자동 세션에서 반복된 사고.)
+   (giip #1244 후속, 2026-08-19 신설. 배경: giip #1202에서 role/rule 파일을 실제로 읽었는지조차
+   불명확한 채 "DB 접속정보 없음" 같은 거짓 결론이 자매 프로젝트(giipprj, 무관한 별도 고객/자매
+   프로젝트)의 자동 세션에서 반복된 사고 — giip-fde-agent에도 동일 유형의 위험이 있어 이 규정을
+   자체적으로 신설했다.)
 2. **참조 정본 변경**: 따라야 할 role/rule/skill/workflow 파일 자체를 수정할 때 — 무엇을 왜.
 3. **대상 파일 변경**: 수정/생성/삭제한 소스·문서를 논리 묶음마다 — 경로 + 한 줄.
    **다중 레포 작업이면 레포 하나 PR 낼 때마다 그 자리에서 즉시 코멘트** — 여러 레포를 다 처리한 뒤
@@ -70,5 +71,6 @@
   항상 코멘트를 동반한다" 2026-08-18 갱신 참고) — 별도로 코멘트 POST 를 먼저/나중에 호출할 필요 없음.
 
 ## 연계
-- 정본: `giipprj/.agent/rules/PROTOCOL_PROGRESS_COMMENT.md` (전체 규칙·result 게이트·완료 위조 금지 포함).
-- nested repo PR 의무: `giipprj/.agent/rules/44_nested_repo_per_repo_pr.md`.
+- 참고: 유사한 진행 코멘트 규칙을 쓰는 다른 프로젝트도 있다(giipprj 등, giip-fde-agent와는 무관한 별도
+  고객/자매 프로젝트). giip-fde-agent는 해당 레포의 파일을 직접 읽거나 쓰지 않으며, 이 문서가 그 어떤
+  외부 레포의 정본에도 종속되지 않는다.
