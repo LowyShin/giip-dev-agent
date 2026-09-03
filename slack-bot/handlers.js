@@ -109,9 +109,13 @@ async function handleSimpleGitOp({ channelId, replyTs, text, workDir = BASE_DIR 
 async function answerInChannel({ channelId, replyTs, text, workDir = BASE_DIR, threadTs = null }) {
   if (await handleSimpleGitOp({ channelId, replyTs, text, workDir })) return;
 
+  // [giip #1971] UI 문자열 다국어화(범위: 이 함수 내 확인/자동PR 알림, i18n-ui.js 참고).
+  const uiT = require('./i18n-ui').t;
+  const uiLang = config.resolveLangForProject(path.basename(workDir));
+
   // 即時受付通知: callClaude は最大20分ブロックし、その間ユーザには何も返らないため
   // 「먹통」に見える。実処理の前に受付メッセージを出して無応答体感を無くす。
-  await postMessage(channelId, '💬 질문을 확인했습니다. 답변을 준비 중입니다…', replyTs);
+  await postMessage(channelId, uiT(uiLang, 'qnaAck'), replyTs);
 
   // スレッド内での質問なら、スレッド全体を取得して文脈として渡す。
   // Bot は mention された1件しか受け取らないため、これをやらないと
@@ -191,12 +195,12 @@ MANDATORY RULE — Task Number: If the user's message contains a 14-digit task n
     const qtitle = String(text).replace(/\s+/g, ' ').trim().slice(0, 60);
     const multi = tm.commitAndPRChangedRepos(`qna-${stamp}`, qtitle, qnaSnapshots);
     const prLines = (multi.prs || []).map(p => `🔀 PR (${path.basename(p.repo)}): ${p.url}`);
-    const skipLines = (multi.skipped || []).map(s => `⚠️ 수동 필요: ${path.basename(s.repo)} (${s.reason})`);
+    const skipLines = (multi.skipped || []).map(s => uiT(uiLang, 'qnaAutoPrManual', { repo: path.basename(s.repo), reason: s.reason }));
     const blockedLines = (multi.blocked || []).map(b =>
-      `🚧 보류: ${path.basename(b.repo)} — 미머지 PR ${(b.prs || []).map(p => '#' + p.number).join(', ')} 과 같은 파일. 브랜치 \`${b.branch}\` push 됨(선행 PR 머지 후 수동 PR/rebase 필요).`);
+      uiT(uiLang, 'qnaAutoPrBlocked', { repo: path.basename(b.repo), prs: (b.prs || []).map(p => '#' + p.number).join(', '), branch: b.branch }));
     if (prLines.length || skipLines.length || blockedLines.length) {
       await postMessage(channelId, [
-        '📝 *답변 중 파일 변경 감지 → 자동 브랜치/PR* (질문 경로 안전망)',
+        uiT(uiLang, 'qnaAutoPrHeader'),
         ...prLines,
         ...blockedLines,
         ...skipLines,
@@ -210,6 +214,9 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
   const convKey = channelId;
   const replyTs = threadTs || undefined;
   const cmd = text.trim().toLowerCase();
+  // [giip #1971] UI 문자열 다국어화(범위: 이 함수 내 태스크 미발견/일반 오류, i18n-ui.js 참고).
+  const uiT = require('./i18n-ui').t;
+  const uiLang = config.resolveLangForProject(path.basename(workDir));
 
   // ── giip 커맨드 (giip api|issue|account) — DM 은 특히 account set(SK) 에 안전 ──
   try {
@@ -290,7 +297,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
       if (logLines) reply += `\n\n*진행 로그(최근):*\n${logLines}`;
       await postMessage(channelId, reply, replyTs);
     } else {
-      await postMessage(channelId, `⚠️ 태스크 \`${targetId}\`를 찾을 수 없습니다.`, replyTs);
+      await postMessage(channelId, uiT(uiLang, 'taskNotFound', { taskId: targetId }), replyTs);
     }
     return;
   }
@@ -328,7 +335,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
       : reply;
     await postLong(channelId, finalReplyDM, replyTs);
   } catch (err) {
-    await postMessage(channelId, `오류: ${err.message}`, replyTs);
+    await postMessage(channelId, uiT(uiLang, 'commonError', { message: err.message }), replyTs);
   }
 }
 
@@ -352,8 +359,11 @@ async function drainNextQueued(reason = 'task-completed') {
     const rt = entry.replyTs || undefined;
     if (!ch) { console.error('[Bot] drainNextQueued: channelId 없음 → 스킵:', key); return; }
     console.log(`[Bot] drainNextQueued(${reason}): 대기 태스크 ${entry.taskId} 자동 기동`);
+    // [giip #1971] UI 문자열 다국어화(i18n-ui.js 참고).
+    const uiT = require('./i18n-ui').t;
+    const uiLang = config.resolveLangForProject(path.basename(entry.workDir || BASE_DIR));
     await postMessage(ch,
-      `▶️ 작업트리가 비었습니다 — 대기 중이던 \`${entry.taskId}\` 을(를) 자동 기동합니다.`,
+      uiT(uiLang, 'taskAutoStart', { taskId: entry.taskId }),
       rt);
     await startTaskExecution(key, entry, ch, rt, ts, entry.workDir || BASE_DIR);
   } catch (e) {
@@ -696,6 +706,9 @@ async function startTaskExecution(pendingKey, pendingTask, channelId, replyTs, t
 async function handleChannelMention({ channelId, ts, threadTs, text, workDir = BASE_DIR, projectName = null }) {
   const convKey = `${channelId}:${threadTs || ts}`;
   const replyTs = threadTs || ts;
+  // [giip #1971] UI 문자열 다국어화(taskmerge 중복없음/머지완료 재개 흐름, i18n-ui.js 참고).
+  const uiT = require('./i18n-ui').t;
+  const uiLang = config.resolveLangForProject(projectName || path.basename(workDir));
   const taskState = loadJSON(TASK_STATE_FILE, { pending: {}, running: {} });
 
   // バッククォート・全角スペース等を除去してからコマンド判定
@@ -1069,7 +1082,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     const doApply = !!mergeCmd[1];
     const clusters = findDuplicatePendingClusters();
     if (clusters.length === 0) {
-      await postMessage(channelId, '🔍 통합 대상 중복 미완료 태스크가 없습니다.', replyTs);
+      await postMessage(channelId, uiT(uiLang, 'taskNoDuplicates'), replyTs);
       return;
     }
 
@@ -1108,18 +1121,18 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     const targetId = mergedDone[1];
     const entry = tm.getTasklistByStatus(null).find(t => t.taskId === targetId);
     if (!entry || !Array.isArray(entry.blocked) || entry.blocked.length === 0) {
-      await postMessage(channelId, `⚠️ \`${targetId}\` 는 보류(blocked) 상태가 아닙니다. \`tasklist all\` 로 상태를 확인하세요.`, replyTs);
+      await postMessage(channelId, uiT(uiLang, 'resumeNotBlocked', { taskId: targetId }), replyTs);
       return;
     }
-    await postMessage(channelId, `🔄 \`${targetId}\` 재개: 선행 PR 머지 반영(base pull→rebase) 후 PR 생성 중...`, replyTs);
+    await postMessage(channelId, uiT(uiLang, 'resuming', { taskId: targetId }), replyTs);
     let res;
     try { res = tm.resumeBlockedTask(targetId, entry.title || targetId, entry.blocked); }
-    catch (e) { await postMessage(channelId, `❌ 재개 실패: ${e.message}`, replyTs); return; }
+    catch (e) { await postMessage(channelId, uiT(uiLang, 'resumeFailed', { message: e.message }), replyTs); return; }
 
     const lines = [];
     for (const p of (res.prs || [])) lines.push(`🔀 PR (${path.basename(p.repo)}): ${p.url}`);
-    for (const s of (res.stillBlocked || [])) lines.push(`🚧 여전히 보류: ${path.basename(s.repo)} — ${s.reason}`);
-    for (const f of (res.failed || [])) lines.push(`⚠️ 실패: ${path.basename(f.repo)} — ${f.reason}`);
+    for (const s of (res.stillBlocked || [])) lines.push(uiT(uiLang, 'resumeStillBlocked', { repo: path.basename(s.repo), reason: s.reason }));
+    for (const f of (res.failed || [])) lines.push(uiT(uiLang, 'resumeFailedRepo', { repo: path.basename(f.repo), reason: f.reason }));
 
     // 아직 해소 안 된 저장소(재-conflict/실패)만 blocked 로 남긴다.
     const unresolved = new Set([...(res.stillBlocked || []).map(s => s.repo), ...(res.failed || []).map(f => f.repo)]);
@@ -1131,9 +1144,9 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     });
     refreshDashboardSafe('task-resumed');
     await postMessage(channelId, [
-      remainingBlocked.length ? `⏸️ *\`${targetId}\` 일부 재개*` : `✅ *\`${targetId}\` 재개 완료*`,
-      ...(lines.length ? lines : ['(변경 없음)']),
-      ...(remainingBlocked.length ? ['', '여전히 conflict/실패인 저장소는 수동 해소가 필요합니다. 해소 후 다시 `머지완료 ' + targetId + '`.'] : []),
+      remainingBlocked.length ? uiT(uiLang, 'resumePartial', { taskId: targetId }) : uiT(uiLang, 'resumeComplete', { taskId: targetId }),
+      ...(lines.length ? lines : [uiT(uiLang, 'resumeNoChange')]),
+      ...(remainingBlocked.length ? ['', uiT(uiLang, 'resumeManualNote', { taskId: targetId })] : []),
     ].join('\n'), replyTs);
     return;
   }
