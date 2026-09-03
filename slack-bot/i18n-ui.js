@@ -10,8 +10,10 @@
  *
  * 범위(giip #1971 1차분): answerInChannel(Q&A 흐름) 확인/자동PR 알림, DM 일반 오류/태스크 미발견,
  * drainNextQueued 자동 기동 알림, `머지완료 <id>` 보류 태스크 재개 흐름, taskmerge 중복 없음 응답.
- * 봇 UI 전반의 나머지 하드코딩 한글 문자열(!help, allowlist, 워크플로우 트리거, task
- * 완료/에러 헤드라인 등)은 이번 PR 범위 밖 — 후속 giip issue 로 남긴다(PR/코멘트 참고).
+ * 범위(giip #1972 추가분): allowlist 설정 표시, 워크플로우 지시 모호/미일치 안내, 태스크 상태/참조
+ * 조회(handleDM·handleChannelMention), 태스크 ID 배너, giip 연동 실패 라인, 라우팅(등급/컨텍스트) 라인.
+ * 남은 하드코딩 문자열(task 완료/에러 헤드라인 블록 — 조건분기가 깊어 별도 세션 필요, 하드코딩 일본어
+ * !help/tasklist 등 — 한글 다국어화와 별개 결함, giip-commands.js)은 이번 범위 밖 — 후속 giip issue 로 남긴다.
  *
  * 설계 원칙 — 하위호환 최우선: 미등록 프로젝트, 미번역 key, 아직 안 채운 언어(zh-CN/zh-TW 등) →
  * 반드시 기존 한글 문자열 그대로 폴백한다. 각 항목의 `ko` 값은 원래 하드코딩돼 있던 문자열과
@@ -38,6 +40,30 @@ const MESSAGES = {
     resumeNoChange: () => '(변경 없음)',
     resumeManualNote: ({ taskId }) => `여전히 conflict/실패인 저장소는 수동 해소가 필요합니다. 해소 후 다시 \`머지완료 ${taskId}\`.`,
     taskNoDuplicates: () => '🔍 통합 대상 중복 미완료 태스크가 없습니다.',
+    // [giip #1972] 나머지 범위 — 태스크 상태/참조 조회, 워크플로우 지시, allowlist, 라우팅 라인
+    taskIdBanner: ({ ids }) => `[태스크 \`${ids}\`]`,
+    taskUnknownStatus: () => '알수없음',
+    taskNoContent: () => '(내용 없음)',
+    statusReportHeader: ({ taskId, status, request }) => `*태스크 \`${taskId}\` — 상태 보고*\n• 상태: ${status}\n• 내용: ${request}`,
+    statusReportLog: ({ logLines }) => `\n\n*진행 로그(최근):*\n${logLines}`,
+    statusReportActions: ({ taskId }) => `\n\n실행: \`go ${taskId}\` | 취소: \`cancel ${taskId}\``,
+    taskRef: ({ taskId, status, request, activeFile }) => `📌 태스크 \`${taskId}\` 참조:\n• 상태: ${status}\n• 내용: ${request}\n📁 파일: \`${activeFile}\`\n\n실행: \`go ${taskId}\` | 취소: \`cancel ${taskId}\``,
+    taskNotFoundShort: ({ taskId }) => `⚠️ 태스크 \`${taskId}\`를 찾을 수 없습니다.`,
+    taskNotFoundTasklist: ({ taskId }) => `⚠️ Task \`${taskId}\`를 찾을 수 없습니다.\n\`tasklist\`로 목록을 확인하세요.`,
+    wfAmbiguous: ({ query, list }) => `🔎 \`${query}\`에 일치하는 워크플로우가 여러 개 있습니다. 하나로 좁혀주세요:\n${list}`,
+    wfNotFound: ({ projName, query, list }) => `❓ \`${projName}\`에 \`${query}\`라는 워크플로우가 없습니다.\n사용 가능:\n${list}\n\n목록: \`${projName} wflist\``,
+    wfListNone: () => '(없음)',
+    giipLinkFailed: ({ error }) => `\n⚠️ giip issue 연동 실패(${error}) — 로컬 태스크 번호로 진행합니다`,
+    routeLine: ({ cls, fastPathSuffix, fileCount, charsSuffix }) => `\n🧭 등급: \`${cls}\`${fastPathSuffix} / 컨텍스트 ${fileCount}개 파일${charsSuffix}`,
+    routeFastPath: () => ' (Fast Path — 계획 생성 호출 생략)',
+    routeChars: ({ chars }) => ` · ${chars}자`,
+    allowlistTitle: () => '*🔐 Allowlist 설정 (SLACK_ALLOWED_USERS / SLACK_CHANNEL_IDS)*',
+    allowlistUsersLabel: () => '*허용된 유저:*',
+    allowlistChannelsLabel: () => '*허용된 채널:*',
+    allowlistUserLookupFail: ({ id }) => `• ${id} ⚠️ 조회 실패(존재하지 않는 ID일 수 있음)`,
+    allowlistChannelLookupFail: ({ id }) => `• ${id} ⚠️ 조회 실패(존재하지 않는 채널일 수 있음)`,
+    allowlistNoUsers: () => '(없음 — 화이트리스트 미설정, 전체 유저 허용됨)',
+    allowlistNoChannels: () => '(없음 — 채널 제한 미설정)',
   },
   en: {
     qnaAck: () => '💬 Got your question. Preparing an answer…',
@@ -57,6 +83,30 @@ const MESSAGES = {
     resumeNoChange: () => '(no change)',
     resumeManualNote: ({ taskId }) => `Repos still in conflict/failed need manual resolution. After resolving, run \`머지완료 ${taskId}\` again.`,
     taskNoDuplicates: () => '🔍 No duplicate incomplete tasks to merge.',
+    // [giip #1972]
+    taskIdBanner: ({ ids }) => `[task \`${ids}\`]`,
+    taskUnknownStatus: () => 'unknown',
+    taskNoContent: () => '(no content)',
+    statusReportHeader: ({ taskId, status, request }) => `*Task \`${taskId}\` — status report*\n• Status: ${status}\n• Content: ${request}`,
+    statusReportLog: ({ logLines }) => `\n\n*Progress log (recent):*\n${logLines}`,
+    statusReportActions: ({ taskId }) => `\n\nRun: \`go ${taskId}\` | Cancel: \`cancel ${taskId}\``,
+    taskRef: ({ taskId, status, request, activeFile }) => `📌 Task \`${taskId}\` reference:\n• Status: ${status}\n• Content: ${request}\n📁 File: \`${activeFile}\`\n\nRun: \`go ${taskId}\` | Cancel: \`cancel ${taskId}\``,
+    taskNotFoundShort: ({ taskId }) => `⚠️ Task \`${taskId}\` not found.`,
+    taskNotFoundTasklist: ({ taskId }) => `⚠️ Task \`${taskId}\` not found.\nCheck the list with \`tasklist\`.`,
+    wfAmbiguous: ({ query, list }) => `🔎 Multiple workflows match \`${query}\`. Please narrow it down:\n${list}`,
+    wfNotFound: ({ projName, query, list }) => `❓ No workflow named \`${query}\` in \`${projName}\`.\nAvailable:\n${list}\n\nList: \`${projName} wflist\``,
+    wfListNone: () => '(none)',
+    giipLinkFailed: ({ error }) => `\n⚠️ giip issue link failed (${error}) — proceeding with the local task number`,
+    routeLine: ({ cls, fastPathSuffix, fileCount, charsSuffix }) => `\n🧭 Class: \`${cls}\`${fastPathSuffix} / context ${fileCount} file(s)${charsSuffix}`,
+    routeFastPath: () => ' (Fast Path — plan-generation call skipped)',
+    routeChars: ({ chars }) => ` · ${chars} chars`,
+    allowlistTitle: () => '*🔐 Allowlist settings (SLACK_ALLOWED_USERS / SLACK_CHANNEL_IDS)*',
+    allowlistUsersLabel: () => '*Allowed users:*',
+    allowlistChannelsLabel: () => '*Allowed channels:*',
+    allowlistUserLookupFail: ({ id }) => `• ${id} ⚠️ lookup failed (may be a non-existent ID)`,
+    allowlistChannelLookupFail: ({ id }) => `• ${id} ⚠️ lookup failed (may be a non-existent channel)`,
+    allowlistNoUsers: () => '(none — whitelist unset, all users allowed)',
+    allowlistNoChannels: () => '(none — no channel restriction)',
   },
   ja: {
     qnaAck: () => '💬 質問を確認しました。回答を準備中です…',
@@ -76,6 +126,30 @@ const MESSAGES = {
     resumeNoChange: () => '(変更なし)',
     resumeManualNote: ({ taskId }) => `まだ conflict/失敗の状態のリポジトリは手動対応が必要です。解消後、再度 \`머지완료 ${taskId}\` を実行してください。`,
     taskNoDuplicates: () => '🔍 統合対象の重複未完了タスクはありません。',
+    // [giip #1972]
+    taskIdBanner: ({ ids }) => `[タスク \`${ids}\`]`,
+    taskUnknownStatus: () => '不明',
+    taskNoContent: () => '(内容なし)',
+    statusReportHeader: ({ taskId, status, request }) => `*タスク \`${taskId}\` — 状態レポート*\n• 状態: ${status}\n• 内容: ${request}`,
+    statusReportLog: ({ logLines }) => `\n\n*進捗ログ(最近):*\n${logLines}`,
+    statusReportActions: ({ taskId }) => `\n\n実行: \`go ${taskId}\` | キャンセル: \`cancel ${taskId}\``,
+    taskRef: ({ taskId, status, request, activeFile }) => `📌 タスク \`${taskId}\` 参照:\n• 状態: ${status}\n• 内容: ${request}\n📁 ファイル: \`${activeFile}\`\n\n実行: \`go ${taskId}\` | キャンセル: \`cancel ${taskId}\``,
+    taskNotFoundShort: ({ taskId }) => `⚠️ タスク \`${taskId}\` が見つかりません。`,
+    taskNotFoundTasklist: ({ taskId }) => `⚠️ Task \`${taskId}\` が見つかりません。\n\`tasklist\` で一覧を確認してください。`,
+    wfAmbiguous: ({ query, list }) => `🔎 \`${query}\` に一致するワークフローが複数あります。1つに絞ってください:\n${list}`,
+    wfNotFound: ({ projName, query, list }) => `❓ \`${projName}\` に \`${query}\` というワークフローがありません。\n利用可能:\n${list}\n\n一覧: \`${projName} wflist\``,
+    wfListNone: () => '(なし)',
+    giipLinkFailed: ({ error }) => `\n⚠️ giip issue 連携失敗(${error}) — ローカルのタスク番号で進めます`,
+    routeLine: ({ cls, fastPathSuffix, fileCount, charsSuffix }) => `\n🧭 等級: \`${cls}\`${fastPathSuffix} / コンテキスト ${fileCount}ファイル${charsSuffix}`,
+    routeFastPath: () => ' (Fast Path — プラン生成呼び出しを省略)',
+    routeChars: ({ chars }) => ` · ${chars}字`,
+    allowlistTitle: () => '*🔐 Allowlist 設定 (SLACK_ALLOWED_USERS / SLACK_CHANNEL_IDS)*',
+    allowlistUsersLabel: () => '*許可されたユーザー:*',
+    allowlistChannelsLabel: () => '*許可されたチャンネル:*',
+    allowlistUserLookupFail: ({ id }) => `• ${id} ⚠️ 照会失敗(存在しない ID の可能性)`,
+    allowlistChannelLookupFail: ({ id }) => `• ${id} ⚠️ 照会失敗(存在しないチャンネルの可能性)`,
+    allowlistNoUsers: () => '(なし — ホワイトリスト未設定、全ユーザー許可)',
+    allowlistNoChannels: () => '(なし — チャンネル制限なし)',
   },
 };
 

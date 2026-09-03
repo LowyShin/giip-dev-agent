@@ -58,31 +58,33 @@ function triggerCsnLangPrefetch(channelId, projectName) {
   } catch (e) { /* best-effort */ }
 }
 
-async function buildAllowlistReply() {
+async function buildAllowlistReply(lang) {
+  // [giip #1972] UI 문자열 다국어화(allowlist 표시, i18n-ui.js 참고). lang 미지정 시 ko 폴백.
+  const uiT = require('./i18n-ui').t;
   const users = config.ALLOWED_USERS;
   const channels = config.CHANNEL_IDS;
 
   const userLines = users.length
     ? await Promise.all(users.map(async (id) => {
         const name = await resolveUserName(id);
-        return name && name !== id ? `• ${name} (${id})` : `• ${id} ⚠️ 조회 실패(존재하지 않는 ID일 수 있음)`;
+        return name && name !== id ? `• ${name} (${id})` : uiT(lang, 'allowlistUserLookupFail', { id });
       }))
-    : ['(없음 — 화이트리스트 미설정, 전체 유저 허용됨)'];
+    : [uiT(lang, 'allowlistNoUsers')];
 
   const channelLines = channels.length
     ? await Promise.all(channels.map(async (id) => {
         const name = await resolveChannelName(id);
-        return name && name !== id ? `• ${name} (${id})` : `• ${id} ⚠️ 조회 실패(존재하지 않는 채널일 수 있음)`;
+        return name && name !== id ? `• ${name} (${id})` : uiT(lang, 'allowlistChannelLookupFail', { id });
       }))
-    : ['(없음 — 채널 제한 미설정)'];
+    : [uiT(lang, 'allowlistNoChannels')];
 
   return [
-    '*🔐 Allowlist 설정 (SLACK_ALLOWED_USERS / SLACK_CHANNEL_IDS)*',
+    uiT(lang, 'allowlistTitle'),
     '',
-    '*허용된 유저:*',
+    uiT(lang, 'allowlistUsersLabel'),
     ...userLines,
     '',
-    '*허용된 채널:*',
+    uiT(lang, 'allowlistChannelsLabel'),
     ...channelLines,
   ].join('\n');
 }
@@ -177,7 +179,7 @@ MANDATORY RULE — Task Number: If the user's message contains a 14-digit task n
     // 코드레벨 강제: 사용자 메시지의 태스크 ID가 응답에 없으면 첫 줄에 삽입
     const missingIds = extractExistingTaskIds(text).filter(id => !reply.includes(id));
     const finalReply = missingIds.length > 0
-      ? `[태스크 \`${missingIds.join('`, `')}\`]\n\n${reply}`
+      ? `${uiT(uiLang, 'taskIdBanner', { ids: missingIds.join('`, `') })}\n\n${reply}`
       : reply;
     await postLong(channelId, finalReply, replyTs);
   } catch (err) {
@@ -252,7 +254,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
     return;
   }
   if (cmd === 'allowlist' || cmd === '!allowlist') {
-    await postMessage(channelId, await buildAllowlistReply(), replyTs);
+    await postMessage(channelId, await buildAllowlistReply(uiLang), replyTs);
     return;
   }
   if (cmd === '!reset') {
@@ -289,12 +291,12 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
       const fc = fs.readFileSync(taskFile, 'utf8');
       const statusM = fc.match(/^status:\s*(.+)$/m);
       const requestM = fc.match(/^request:\s*"?([^\n"]{1,120})/m);
-      const status = statusM ? statusM[1].trim() : '알수없음';
-      const request = requestM ? requestM[1].trim() : '(내용 없음)';
+      const status = statusM ? statusM[1].trim() : uiT(uiLang, 'taskUnknownStatus');
+      const request = requestM ? requestM[1].trim() : uiT(uiLang, 'taskNoContent');
       const logMatch = fc.match(/## 進捗ログ([\s\S]*)/);
       const logLines = logMatch ? logMatch[1].trim().split('\n').filter(l => l.startsWith('|')).slice(-5).join('\n') : null;
-      let reply = `*태스크 \`${targetId}\` — 상태 보고*\n• 상태: ${status}\n• 내용: ${request}`;
-      if (logLines) reply += `\n\n*진행 로그(최근):*\n${logLines}`;
+      let reply = uiT(uiLang, 'statusReportHeader', { taskId: targetId, status, request });
+      if (logLines) reply += uiT(uiLang, 'statusReportLog', { logLines });
       await postMessage(channelId, reply, replyTs);
     } else {
       await postMessage(channelId, uiT(uiLang, 'taskNotFound', { taskId: targetId }), replyTs);
@@ -331,7 +333,7 @@ async function handleDM({ channelId, ts, threadTs, text, conversations, workDir 
     // 코드레벨 강제: 사용자 메시지의 태스크 ID가 응답에 없으면 첫 줄에 삽입
     const missingIdsDM = extractExistingTaskIds(text).filter(id => !reply.includes(id));
     const finalReplyDM = missingIdsDM.length > 0
-      ? `[태스크 \`${missingIdsDM.join('`, `')}\`]\n\n${reply}`
+      ? `${uiT(uiLang, 'taskIdBanner', { ids: missingIdsDM.join('`, `') })}\n\n${reply}`
       : reply;
     await postLong(channelId, finalReplyDM, replyTs);
   } catch (err) {
@@ -857,7 +859,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
     return;
   }
   if (cmd === 'allowlist' || cmd === '!allowlist') {
-    await postMessage(channelId, await buildAllowlistReply(), replyTs);
+    await postMessage(channelId, await buildAllowlistReply(uiLang), replyTs);
     return;
   }
   if (cmd === '!issues' || cmd === '!issues refresh') {
@@ -956,16 +958,16 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         if (subs.length === 1) match = subs[0];
         else if (subs.length > 1) {
           await postMessage(channelId,
-            `🔎 \`${query}\`에 일치하는 워크플로우가 여러 개 있습니다. 하나로 좁혀주세요:\n${subs.map(f => `• \`${nameOf(f)}\``).join('\n')}`,
+            uiT(uiLang, 'wfAmbiguous', { query, list: subs.map(f => `• \`${nameOf(f)}\``).join('\n') }),
             replyTs);
           return;
         }
       }
       // 느슨한 형태로 미일치 → 워크플로우 지시가 아님. 일반 라우팅으로 폴스루.
       if (!match && !looseForm) {
-        const list = candidates.length ? candidates.map(f => `• \`${nameOf(f)}\``).join('\n') : '(없음)';
+        const list = candidates.length ? candidates.map(f => `• \`${nameOf(f)}\``).join('\n') : uiT(uiLang, 'wfListNone');
         await postMessage(channelId,
-          `❓ \`${projName}\`에 \`${query}\`라는 워크플로우가 없습니다.\n사용 가능:\n${list}\n\n목록: \`${projName} wflist\``,
+          uiT(uiLang, 'wfNotFound', { projName, query, list }),
           replyTs);
         return;
       }
@@ -1181,7 +1183,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
             await postMessage(channelId, `⚠️ キャンセル失敗: ${err.message}`, replyTs);
           }
         } else {
-          await postMessage(channelId, `⚠️ Task \`${targetId}\`를 찾을 수 없습니다.\n\`tasklist\`로 목록을 확인하세요.`, replyTs);
+          await postMessage(channelId, uiT(uiLang, 'taskNotFoundTasklist', { taskId: targetId }), replyTs);
         }
       }
     }
@@ -1245,7 +1247,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         } else if (fs.existsSync(cancelFile)) {
           await postMessage(channelId, `🚫 Task \`${targetId}\` はキャンセル済みです。`, replyTs);
         } else {
-          await postMessage(channelId, `⚠️ Task \`${targetId}\`를 찾을 수 없습니다.\n\`tasklist\`로 목록을 확인하세요.`, replyTs);
+          await postMessage(channelId, uiT(uiLang, 'taskNotFoundTasklist', { taskId: targetId }), replyTs);
         }
       }
       return;
@@ -1285,16 +1287,16 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
       const fc = fs.readFileSync(taskFile, 'utf8');
       const statusM = fc.match(/^status:\s*(.+)$/m);
       const requestM = fc.match(/^request:\s*"?([^\n"]{1,120})/m);
-      const status = statusM ? statusM[1].trim() : '알수없음';
-      const request = requestM ? requestM[1].trim() : '(내용 없음)';
+      const status = statusM ? statusM[1].trim() : uiT(uiLang, 'taskUnknownStatus');
+      const request = requestM ? requestM[1].trim() : uiT(uiLang, 'taskNoContent');
       const logMatch = fc.match(/## 進捗ログ([\s\S]*)/);
       const logLines = logMatch ? logMatch[1].trim().split('\n').filter(l => l.startsWith('|')).slice(-5).join('\n') : null;
-      let reply = `*태스크 \`${targetId}\` — 상태 보고*\n• 상태: ${status}\n• 내용: ${request}`;
-      if (logLines) reply += `\n\n*진행 로그(최근):*\n${logLines}`;
-      reply += `\n\n실행: \`go ${targetId}\` | 취소: \`cancel ${targetId}\``;
+      let reply = uiT(uiLang, 'statusReportHeader', { taskId: targetId, status, request });
+      if (logLines) reply += uiT(uiLang, 'statusReportLog', { logLines });
+      reply += uiT(uiLang, 'statusReportActions', { taskId: targetId });
       await postMessage(channelId, reply, replyTs);
     } else {
-      await postMessage(channelId, `⚠️ 태스크 \`${targetId}\`를 찾을 수 없습니다.`, replyTs);
+      await postMessage(channelId, uiT(uiLang, 'taskNotFoundShort', { taskId: targetId }), replyTs);
     }
     return;
   }
@@ -1328,14 +1330,14 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         const fc = fs.readFileSync(activeFile, 'utf8');
         const statusM = fc.match(/^status:\s*(.+)$/m);
         const requestM = fc.match(/^request:\s*"?([^\n"]{1,100})/m);
-        const status = statusM ? statusM[1].trim() : '알수없음';
-        const request = requestM ? requestM[1].trim() : '(내용 없음)';
+        const status = statusM ? statusM[1].trim() : uiT(uiLang, 'taskUnknownStatus');
+        const request = requestM ? requestM[1].trim() : uiT(uiLang, 'taskNoContent');
         await postMessage(channelId,
-          `📌 태스크 \`${targetId}\` 참조:\n• 상태: ${status}\n• 내용: ${request}\n📁 파일: \`${activeFile}\`\n\n실행: \`go ${targetId}\` | 취소: \`cancel ${targetId}\``,
+          uiT(uiLang, 'taskRef', { taskId: targetId, status, request, activeFile }),
           replyTs
         );
       } else {
-        await postMessage(channelId, `⚠️ 태스크 \`${targetId}\`를 찾을 수 없습니다.`, replyTs);
+        await postMessage(channelId, uiT(uiLang, 'taskNotFoundShort', { taskId: targetId }), replyTs);
       }
       return;
     }
@@ -1505,7 +1507,7 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
   //   것이므로 사유를 노출한다(과거: 둘 다 같은 타임스탬프 ID 로만 보여 원인을 구분할 수 없었다).
   const isnLine = giipIsn
     ? `\n🔗 giip issue #${giipIsn}`
-    : (giipIssueError ? `\n⚠️ giip issue 연동 실패(${giipIssueError}) — 로컬 태스크 번호로 진행합니다` : '');
+    : (giipIssueError ? uiT(uiLang, 'giipLinkFailed', { error: giipIssueError }) : '');
 
   // 明示的命令形(처리/수정/구현…해줘 = isForceTaskCmd)は「実行の意思確定」= go と等価。
   //   分析後そのまま実行し、redundant な二度目の `go` を要求しない(ユーザ指摘の恒久対応)。
@@ -1518,9 +1520,12 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
   const headline = (reuseTaskId && !linkedIsn) ? 'Task 更新完了' : 'Task 分析完了';
   // giip-1063: 어떤 등급으로 분류해 어떤 컨텍스트를 실었는지 한 줄로 보인다(비용 가시성).
   const routeLine = classification
-    ? `\n🧭 등급: \`${classification.class}\`${fastPath ? ' (Fast Path — 계획 생성 호출 생략)' : ''}`
-      + ` / 컨텍스트 ${contextStats ? contextStats.files : filesRead.length}개 파일`
-      + `${contextStats ? ` · ${contextStats.chars.toLocaleString()}자` : ''}`
+    ? uiT(uiLang, 'routeLine', {
+        cls: classification.class,
+        fastPathSuffix: fastPath ? uiT(uiLang, 'routeFastPath') : '',
+        fileCount: contextStats ? contextStats.files : filesRead.length,
+        charsSuffix: contextStats ? uiT(uiLang, 'routeChars', { chars: contextStats.chars.toLocaleString() }) : '',
+      })
     : '';
   await postLong(channelId,
     `📋 *${headline}* (\`${taskId}\`)${isnLine}${routeLine}${closedNotice}\n\n${planContent}\n\n---\n${footer}`,
