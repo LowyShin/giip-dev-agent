@@ -33,6 +33,12 @@ async function handleGiipCommand(rawText, channelId) {
   const sub = m[1].toLowerCase();
   const rest = (m[2] || '').trim();
 
+  // [giip #1972] item 8 — UI 문자열 다국어화(giip-commands.js). 채널→프로젝트→언어로 해석,
+  // 미매핑 채널/미등록 프로젝트/미상 언어는 config.resolveLangForProject 가 DEFAULT_LANG('ko')로
+  // 폴백하므로 기존 한글 응답과 byte-for-byte 하위호환. i18n-ui.js MESSAGES={ko/en/ja} 패턴 재사용.
+  const uiT = require('./i18n-ui').t;
+  const uiLang = config.resolveLangForProject(config.resolveChannelProject(channelId));
+
   // ── giip account ... — 채널 계정 매핑(대화로 변경 → .secrets 영속화) ──
   if (sub === 'account') {
     const setM = rest.match(/^set(-default)?\s+(\S+)\s+(\S+)\s*(\d+)?/i);
@@ -44,19 +50,19 @@ async function handleGiipCommand(rawText, channelId) {
       accounts.setAccount(asDefault ? null : channelId, { login_id, sk, csn }, asDefault);
       return {
         handled: true,
-        text: `✅ giip 계정 저장(${asDefault ? 'default' : channelId}) — login=${login_id}${csn ? `, csn=${csn}` : ''}.\n⚠️ 보안: SK 가 포함된 이 메시지는 삭제하세요.`,
+        text: uiT(uiLang, 'gcAcctSaved', { scope: asDefault ? 'default' : channelId, login: login_id, csnPart: csn ? `, csn=${csn}` : '' }),
       };
     }
     if (/^(show|status)/i.test(rest)) {
       const acct = accounts.resolve(channelId);
       return {
         handled: true,
-        text: acct ? `login=${acct.login_id}, csn=${acct.csn ?? '-'} (SK 숨김)` : '계정 미설정',
+        text: acct ? uiT(uiLang, 'gcAcctShow', { login: acct.login_id, csn: acct.csn ?? '-' }) : uiT(uiLang, 'gcAcctUnset'),
       };
     }
     return {
       handled: true,
-      text: '사용법: `giip account set <login_id> <sk> [csn]` | `set-default <login_id> <sk> [csn]` | `show`',
+      text: uiT(uiLang, 'gcAcctUsage'),
     };
   }
 
@@ -70,7 +76,7 @@ async function handleGiipCommand(rawText, channelId) {
     if (langMatch) {
       const langAction = (langMatch[1] || 'list').toLowerCase();
       const largs = (langMatch[2] || '').trim();
-      const LANG_USAGE = '사용법: `giip project lang set <프로젝트명> <언어코드(ko/ja/en/zh-CN/zh-TW)>` | `giip project lang list` | `giip project lang del <프로젝트명>`';
+      const LANG_USAGE = uiT(uiLang, 'gcLangUsage');
       try {
         if (langAction === 'set') {
           const sm = largs.match(/^(\S+)\s+(\S+)$/);
@@ -78,19 +84,19 @@ async function handleGiipCommand(rawText, channelId) {
           const { name, lang } = config.setProjectLang(sm[1], sm[2]);
           return {
             handled: true,
-            text: `✅ 프로젝트 언어 설정 저장: \`${name}\` → \`${lang}\`\n이제 \`${name}\` 프로젝트의 AI 응답은 이 언어로 지정됩니다(봇 재시작 불필요).`,
+            text: uiT(uiLang, 'gcLangSet', { name, lang }),
           };
         }
         if (langAction === 'del' || langAction === 'delete' || langAction === 'rm' || langAction === 'remove') {
           const name = largs.split(/\s+/)[0];
           if (!name) return { handled: true, text: LANG_USAGE };
           const ok = config.deleteProjectLang(name);
-          return { handled: true, text: ok ? `✅ 언어 설정 삭제: \`${name.toLowerCase()}\`(기본값 ko로 폴백)` : `⚠️ \`${name.toLowerCase()}\` 언어 설정이 없습니다.` };
+          return { handled: true, text: ok ? uiT(uiLang, 'gcLangDelOk', { name: name.toLowerCase() }) : uiT(uiLang, 'gcLangDelMiss', { name: name.toLowerCase() }) };
         }
         const lmap = config.listProjectLang();
         const lkeys = Object.keys(lmap);
-        const lbody = lkeys.length ? lkeys.map((k) => `• \`${k}\` → \`${lmap[k]}\``).join('\n') : '(등록된 언어 설정 없음, 전부 기본값 ko)';
-        return { handled: true, text: `📋 프로젝트 → 응답언어 매핑 (project-lang.json)\n${lbody}\n\n${LANG_USAGE}` };
+        const lbody = lkeys.length ? lkeys.map((k) => `• \`${k}\` → \`${lmap[k]}\``).join('\n') : uiT(uiLang, 'gcLangListEmpty');
+        return { handled: true, text: uiT(uiLang, 'gcLangListHeader', { body: lbody, usage: LANG_USAGE }) };
       } catch (e) {
         return { handled: true, text: `❌ ${e.message}\n${LANG_USAGE}` };
       }
@@ -98,7 +104,7 @@ async function handleGiipCommand(rawText, channelId) {
     const pm = rest.match(/^(set|add|del|delete|rm|remove|list|ls|show)?\s*([\s\S]*)$/i);
     const action = (pm && pm[1] ? pm[1].toLowerCase() : 'list');
     const pargs = pm ? (pm[2] || '').trim() : '';
-    const USAGE = '사용법: `giip project set <프로젝트명> <csn>` | `giip project list` | `giip project del <프로젝트명>`';
+    const USAGE = uiT(uiLang, 'gcProjUsage');
     try {
       if (action === 'set' || action === 'add') {
         const sm = pargs.match(/^(\S+)\s+(-?\d+)$/);
@@ -111,36 +117,36 @@ async function handleGiipCommand(rawText, channelId) {
         let grantLine = '';
         const acctForGrant = accounts.resolve(channelId);
         if (Number(csn) === 47) {
-          grantLine = '\n(홈 CSN 47 은 항상 허용되므로 멤버십 부여 불필요)';
+          grantLine = uiT(uiLang, 'gcGrantHome47');
         } else if (!acctForGrant) {
-          grantLine = '\n⚠️ giip 계정 미설정이라 DB 멤버십은 부여하지 못했습니다. `giip account set ...` 후 다시 `set` 하세요.';
+          grantLine = uiT(uiLang, 'gcGrantNoAcct');
         } else {
           try {
             const g = await giip.grantBotCsn(acctForGrant, csn);
             if (g.ok) grantLine = g.already
-              ? `\n🟢 DB 멤버십 이미 존재 (tUserPerCorp usn↔csn ${csn}).`
-              : `\n🟢 DB 멤버십 부여 완료 (tUserPerCorp += csn ${csn}). 다음 등록부터 바로 반영.`;
-            else grantLine = `\n⚠️ DB 멤버십 부여 실패(RstVal=${g.rstVal ?? '?'}): ${g.msg || '알 수 없음'}. map 은 저장됨.`;
+              ? uiT(uiLang, 'gcGrantAlready', { csn })
+              : uiT(uiLang, 'gcGrantDone', { csn });
+            else grantLine = uiT(uiLang, 'gcGrantFail', { rstVal: g.rstVal ?? '?', msg: g.msg || uiT(uiLang, 'gcGrantUnknownMsg') });
           } catch (e) {
-            grantLine = `\n⚠️ DB 멤버십 부여 호출 오류: ${e.message}. map 은 저장됨.`;
+            grantLine = uiT(uiLang, 'gcGrantCallErr', { message: e.message });
           }
         }
         return {
           handled: true,
-          text: `✅ 프로젝트 CSN 매핑 저장: \`${name}\` → csn ${csn}\n이제 \`${name} issue 등록 <내용>\` 은 csn ${csn} 로 등록됩니다(봇 재시작 불필요).${grantLine}`,
+          text: uiT(uiLang, 'gcProjSet', { name, csn, grantLine }),
         };
       }
       if (action === 'del' || action === 'delete' || action === 'rm' || action === 'remove') {
         const name = pargs.split(/\s+/)[0];
         if (!name) return { handled: true, text: USAGE };
         const ok = config.deleteProjectCsn(name);
-        return { handled: true, text: ok ? `✅ 매핑 삭제: \`${name.toLowerCase()}\`` : `⚠️ \`${name.toLowerCase()}\` 매핑이 없습니다.` };
+        return { handled: true, text: ok ? uiT(uiLang, 'gcProjDelOk', { name: name.toLowerCase() }) : uiT(uiLang, 'gcProjDelMiss', { name: name.toLowerCase() }) };
       }
       // list / ls / show / (인자 없음)
       const map = config.listProjectCsn();
       const keys = Object.keys(map);
-      const body = keys.length ? keys.map((k) => `• \`${k}\` → csn ${map[k]}`).join('\n') : '(등록된 매핑 없음)';
-      return { handled: true, text: `📋 프로젝트 → CSN 매핑 (project-csn.json)\n${body}\n\n${USAGE}` };
+      const body = keys.length ? keys.map((k) => `• \`${k}\` → csn ${map[k]}`).join('\n') : uiT(uiLang, 'gcMapEmpty');
+      return { handled: true, text: uiT(uiLang, 'gcProjListHeader', { body, usage: USAGE }) };
     } catch (e) {
       return { handled: true, text: `❌ ${e.message}\n${USAGE}` };
     }
@@ -153,7 +159,7 @@ async function handleGiipCommand(rawText, channelId) {
     const cm = rest.match(/^(set|del|delete|rm|remove|list|ls|show)?\s*([\s\S]*)$/i);
     const action = (cm && cm[1] ? cm[1].toLowerCase() : 'list');
     const cargs = cm ? (cm[2] || '').trim() : '';
-    const USAGE = '사용법: `giip channel set <프로젝트명> [채널ID]` | `giip channel list` | `giip channel del [채널ID]`';
+    const USAGE = uiT(uiLang, 'gcChUsage');
     try {
       if (action === 'set') {
         // `set <프로젝트명> [채널ID]` — 채널ID 생략 시 현재 채널.
@@ -161,19 +167,19 @@ async function handleGiipCommand(rawText, channelId) {
         if (!sm) return { handled: true, text: USAGE };
         const project = sm[1];
         const target = sm[2] || channelId;
-        if (!target) return { handled: true, text: '채널ID를 확인할 수 없습니다. `giip channel set <프로젝트명> <채널ID>` 로 명시하세요.' };
+        if (!target) return { handled: true, text: uiT(uiLang, 'gcChNoId') };
         const { channelId: cid, project: pj } = config.setChannelProject(target, project);
         const csn = config.resolveProjectCsn(pj);
         return {
           handled: true,
-          text: `✅ 채널 고정 매핑 저장: \`${cid}\` → \`${pj}\`${csn != null ? ` (csn ${csn})` : ' (project-csn.json 미등록 → account 기본 csn)'}\n이제 이 채널의 접두어 없는 메시지는 모두 \`${pj}\` 로 처리됩니다(봇 재시작 불필요). 명시적 프로젝트 접두어는 계속 우선합니다.`,
+          text: uiT(uiLang, 'gcChSet', { cid, pj, csnPart: csn != null ? ` (csn ${csn})` : uiT(uiLang, 'gcChSetNoCsn') }),
         };
       }
       if (action === 'del' || action === 'delete' || action === 'rm' || action === 'remove') {
         const target = cargs.split(/\s+/)[0] || channelId;
         if (!target) return { handled: true, text: USAGE };
         const ok = config.deleteChannelProject(target);
-        return { handled: true, text: ok ? `✅ 채널 매핑 삭제: \`${target}\`` : `⚠️ \`${target}\` 매핑이 없습니다.` };
+        return { handled: true, text: ok ? uiT(uiLang, 'gcChDelOk', { target }) : uiT(uiLang, 'gcChDelMiss', { target }) };
       }
       // list / ls / show / (인자 없음)
       const map = config.listChannelProject();
@@ -181,10 +187,10 @@ async function handleGiipCommand(rawText, channelId) {
       const body = keys.length
         ? keys.map((k) => {
             const csn = config.resolveProjectCsn(map[k]);
-            return `• \`${k}\` → \`${map[k]}\`${csn != null ? ` (csn ${csn})` : ''}${k === channelId ? ' ← 현재 채널' : ''}`;
+            return `• \`${k}\` → \`${map[k]}\`${csn != null ? ` (csn ${csn})` : ''}${k === channelId ? uiT(uiLang, 'gcChCurrentMark') : ''}`;
           }).join('\n')
-        : '(등록된 매핑 없음)';
-      return { handled: true, text: `📌 채널 → 기본 프로젝트 매핑 (channel-project.json)\n${body}\n\n${USAGE}` };
+        : uiT(uiLang, 'gcMapEmpty');
+      return { handled: true, text: uiT(uiLang, 'gcChListHeader', { body, usage: USAGE }) };
     } catch (e) {
       return { handled: true, text: `❌ ${e.message}\n${USAGE}` };
     }
@@ -194,7 +200,7 @@ async function handleGiipCommand(rawText, channelId) {
   if (!acct) {
     return {
       handled: true,
-      text: '⚠️ giip 계정 미설정. `giip account set <login_id> <sk> [csn]` 로 등록하세요(DM 권장).',
+      text: uiT(uiLang, 'gcAcctNotSet'),
     };
   }
 
@@ -227,7 +233,7 @@ async function handleGiipCommand(rawText, channelId) {
       if (action === 'new' || action === 'create') {
         const title = arg.replace(/^["']|["']$/g, '').trim() || '(무제)';
         const r = await giip.issueCreate(acct, { title, content: title, status: 'IN_PROGRESS' });
-        return { handled: true, text: `✅ 이슈 생성 #${r.isn} — ${title}` };
+        return { handled: true, text: uiT(uiLang, 'gcIssueCreated', { isn: r.isn, title }) };
       }
       // [giip #1211] 상태전이 코멘트는 giip.issueUpdate 내부에서 항상 자동 등록된다(giip-api.js 참고) —
       // 여기서는 어떤 Slack 명령이 트리거했는지만 reason 으로 넘긴다.
@@ -237,17 +243,17 @@ async function handleGiipCommand(rawText, channelId) {
       if (action === 'get' || action === 'show') { const i = await giip.issueGet(acct, Number(arg)); return { handled: true, text: code(i, 1500) }; }
       if (action === 'comment') {
         const cm = arg.match(/^(\d+)\s+([\s\S]+)$/);
-        if (cm) { await giip.issueComment(acct, Number(cm[1]), cm[2]); return { handled: true, text: `✅ #${cm[1]} 코멘트 추가` }; }
-        return { handled: true, text: '사용법: `giip issue comment <isn> <내용>`' };
+        if (cm) { await giip.issueComment(acct, Number(cm[1]), cm[2]); return { handled: true, text: uiT(uiLang, 'gcIssueCommentAdded', { isn: cm[1] }) }; }
+        return { handled: true, text: uiT(uiLang, 'gcIssueCommentUsage') };
       }
       if (action === 'list') {
         const list = await giip.issueList(acct, { status: arg || '', csn: acct.csn || '' });
         return {
           handled: true,
-          text: list.length ? list.slice(0, 20).map((i) => `#${i.isn} [${i.status}] ${i.title}`).join('\n') : '(이슈 없음)',
+          text: list.length ? list.slice(0, 20).map((i) => `#${i.isn} [${i.status}] ${i.title}`).join('\n') : uiT(uiLang, 'gcIssueListEmpty'),
         };
       }
-      return { handled: true, text: '사용법: `giip issue new "<title>"` | `list [status]` | `get <isn>` | `done|review|progress <isn>` | `comment <isn> <text>`' };
+      return { handled: true, text: uiT(uiLang, 'gcIssueUsage') };
     } catch (e) {
       return { handled: true, text: `❌ ${e.message}` };
     }
@@ -256,12 +262,12 @@ async function handleGiipCommand(rawText, channelId) {
   // ── giip api <Verb> [jsondata] — 범용 giip API 호출 ──
   if (sub === 'api') {
     const am = rest.match(/^(\S+)\s*([\s\S]*)$/);
-    if (!am) return { handled: true, text: '사용법: `giip api <Verb> [jsondata]`' };
+    if (!am) return { handled: true, text: uiT(uiLang, 'gcApiUsage') };
     const verb = am[1];
     let jsondata = null;
     const jsonPart = (am[2] || '').trim();
     if (jsonPart) {
-      try { jsondata = JSON.parse(jsonPart); } catch { return { handled: true, text: 'jsondata JSON 파싱 실패' }; }
+      try { jsondata = JSON.parse(jsonPart); } catch { return { handled: true, text: uiT(uiLang, 'gcApiJsonParseFail') }; }
     }
     try {
       const r = await giip.apiCall(acct, verb, jsondata);
