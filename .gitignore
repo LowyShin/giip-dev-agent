@@ -13,6 +13,7 @@ giipdb/
 slack-bot/.bot-threads.json
 slack-bot/.task-state.json
 slack-bot/tasklist.json
+slack-bot/.csn-lang-cache.env
 
 # slack-bot giip 계정 시크릿(SK) — 실값 비커밋, *.sample 만 추적
 slack-bot/.secrets/*
