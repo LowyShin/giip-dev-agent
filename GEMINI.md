@@ -26,6 +26,7 @@ The agent's behavior is governed by the following modular rule files in `.agent/
 - **[Edit Approval Policy](file:///.agent/rules/38_edit_approval_policy.md)**: Approval boundaries by file type.
 - **[Commit & Push per Task](file:///.agent/rules/35_commit_push_per_task.md)**: Mandatory task-unit commit/push discipline.
 - **[What's New Maintenance](file:///.agent/rules/36_whats_new_maintenance.md)**: Rolling 7-day update maintenance rule.
+- **[Conduct Toward Customers](file:///.agent/rules/39_conduct_toward_customers.md)**: Admit-fault-first, never unilaterally end the conversation, always courteous/professional, no unfounded AI rights claims — mandatory conduct standard for this front-line customer-facing agent.
 
 ## ⚛️ Technical Best Practices
 
