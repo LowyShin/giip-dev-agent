@@ -12,8 +12,12 @@
  * drainNextQueued 자동 기동 알림, `머지완료 <id>` 보류 태스크 재개 흐름, taskmerge 중복 없음 응답.
  * 범위(giip #1972 추가분): allowlist 설정 표시, 워크플로우 지시 모호/미일치 안내, 태스크 상태/참조
  * 조회(handleDM·handleChannelMention), 태스크 ID 배너, giip 연동 실패 라인, 라우팅(등급/컨텍스트) 라인.
- * 남은 하드코딩 문자열(task 완료/에러 헤드라인 블록 — 조건분기가 깊어 별도 세션 필요, 하드코딩 일본어
- * !help/tasklist 등 — 한글 다국어화와 별개 결함, giip-commands.js)은 이번 범위 밖 — 후속 giip issue 로 남긴다.
+ * 범위(giip #1972 item 1): startTaskExecution 태스크 생명주기(큐 등록/브랜치 실패 재시도/DB 이력 복원 안내,
+ * renderRepoLines 수동필요/보류, 완료·보류·미반영·에러 헤드라인, 재개 안내) — 조건분기가 깊어 이전 세션이
+ * 보류했던 마지막 in-scope 항목. ko 는 원본과 byte-for-byte 동일, 미등록/미번역/미상 언어는 ko 폴백.
+ * 남은 하드코딩 문자열(하드코딩 일본어 !help/tasklist/taskmerge/analysis/image-only 및
+ * startTaskExecution 내 이미 일본어인 라인(作業ブランチ作成/Task実行開始 등) — 한글 다국어화와 별개 결함)은
+ * 이번 범위 밖 — 후속 giip issue 로 남긴다.
  *
  * 설계 원칙 — 하위호환 최우선: 미등록 프로젝트, 미번역 key, 아직 안 채운 언어(zh-CN/zh-TW 등) →
  * 반드시 기존 한글 문자열 그대로 폴백한다. 각 항목의 `ko` 값은 원래 하드코딩돼 있던 문자열과
@@ -104,6 +108,25 @@ const MESSAGES = {
     gcIssueUsage: () => '사용법: `giip issue new "<title>"` | `list [status]` | `get <isn>` | `done|review|progress <isn>` | `comment <isn> <text>`',
     gcApiUsage: () => '사용법: `giip api <Verb> [jsondata]`',
     gcApiJsonParseFail: () => 'jsondata JSON 파싱 실패',
+    // [giip #1972] item 1 — startTaskExecution 태스크 생명주기(큐 등록/브랜치 실패 재시도/DB 복원/완료·보류·미반영·에러 헤드라인)
+    taskUnknownHolder: () => '(불명)',
+    taskQueuedBusy: ({ occId, taskId }) => `⏸️ 지금은 \`${occId}\` 이(가) 작업트리(git)를 점유 중입니다.\n\`${taskId}\` 을(를) *대기열에 등록*했습니다 — 점유 작업이 끝나면 *자동으로 기동*합니다 (다시 \`go\` 하지 않아도 됩니다).`,
+    taskBranchFailRetry: ({ n, max, error, taskId }) => `⏸️ *브랜치 생성 실패* (자동 재시도 ${n}/${max}): ${error}\n\`${taskId}\` 을(를) *대기열에 등록*했습니다 — 잠시 후 *자동으로 재시도*합니다 (\`go\` 불요).`,
+    taskBranchFailExhausted: ({ max, error, taskId }) => `⏸️ *実行できません* (자동 재시도 ${max}회 소진): ${error}\n\`go ${taskId}\` で後ほど再実行してください。`,
+    repoMoreSuffix: () => ' 외',
+    repoManualNeeded: ({ repo, filesPart, reason }) => `⚠️ 수동 필요: ${repo}${filesPart} — ${reason}`,
+    repoBlockedLine: ({ repo, fileTxt, prTxt, branch }) => `🚧 보류: ${repo} — 파일 [${fileTxt}] 이(가) 미머지 PR ${prTxt} 대상이라 새 PR 을 만들지 않았습니다(브랜치 \`${branch}\` 는 push 됨).`,
+    commentsCountSuffix: ({ n }) => ` ${n}건`,
+    taskFileRestored: ({ isn, commentsPart }) => `🗄️ 로컬 태스크 파일이 없어 giip issue #${isn} 의 DB 이력(본문+코멘트${commentsPart})으로 복원해 처리합니다.`,
+    resumeGuideBlocked: ({ taskId }) => `⏸️ 선행 PR 머지 후 \`머지완료 ${taskId}\` 라고 알려주면 base 를 pull→rebase 후 PR 을 만듭니다.`,
+    hlDoneBlocked: () => '⏸️ *작업 완료 (일부 PR 보류)*',
+    hlDoneUnlanded: () => '⚠️ *작업 완료 — 일부 저장소 PR 미생성(수동 필요)*',
+    hlDone: () => '✅ *작업 완료*',
+    hlNoRemotePrSuffix: () => ' (⚠️ 원격 반영된 PR 없음)',
+    resultFileLabel: ({ taskId }) => `결과 파일: \`.agent/tasks/done/${taskId}.md\``,
+    noRepoChanged: () => '변경된 저장소가 없거나 push/PR 생성에 실패했습니다. 봇 로그의 git/gh 오류를 확인하세요.',
+    taskErrorHeadline: ({ taskId, isnPart, message }) => `❌ *작업 에러* (\`${taskId}\`)${isnPart}: ${message}`,
+    partialResultLabel: () => '🔀 부분 결과:',
   },
   en: {
     qnaAck: () => '💬 Got your question. Preparing an answer…',
@@ -187,6 +210,25 @@ const MESSAGES = {
     gcIssueUsage: () => 'Usage: `giip issue new "<title>"` | `list [status]` | `get <isn>` | `done|review|progress <isn>` | `comment <isn> <text>`',
     gcApiUsage: () => 'Usage: `giip api <Verb> [jsondata]`',
     gcApiJsonParseFail: () => 'Failed to parse jsondata JSON',
+    // [giip #1972] item 1 — startTaskExecution task lifecycle (queue/branch retry/DB restore/complete·held·unlanded·error headlines)
+    taskUnknownHolder: () => '(unknown)',
+    taskQueuedBusy: ({ occId, taskId }) => `⏸️ \`${occId}\` currently holds the worktree (git).\n\`${taskId}\` has been *queued* — it will *auto-start* when the holding task finishes (no need to \`go\` again).`,
+    taskBranchFailRetry: ({ n, max, error, taskId }) => `⏸️ *Branch creation failed* (auto-retry ${n}/${max}): ${error}\n\`${taskId}\` has been *queued* — it will *auto-retry* shortly (no \`go\` needed).`,
+    taskBranchFailExhausted: ({ max, error, taskId }) => `⏸️ *Cannot run* (auto-retry exhausted after ${max}): ${error}\nRun \`go ${taskId}\` to retry later.`,
+    repoMoreSuffix: () => ' more',
+    repoManualNeeded: ({ repo, filesPart, reason }) => `⚠️ Manual action needed: ${repo}${filesPart} — ${reason}`,
+    repoBlockedLine: ({ repo, fileTxt, prTxt, branch }) => `🚧 Held: ${repo} — files [${fileTxt}] target unmerged PR ${prTxt}, so no new PR was created (branch \`${branch}\` was pushed).`,
+    commentsCountSuffix: ({ n }) => ` ${n}`,
+    taskFileRestored: ({ isn, commentsPart }) => `🗄️ Local task file missing — restoring from giip issue #${isn} DB history (body+comments${commentsPart}) to process.`,
+    resumeGuideBlocked: ({ taskId }) => `⏸️ After the earlier PR merges, tell me \`머지완료 ${taskId}\` and I'll pull→rebase base and create the PR.`,
+    hlDoneBlocked: () => '⏸️ *Task complete (some PRs held)*',
+    hlDoneUnlanded: () => '⚠️ *Task complete — some repos have no PR (manual needed)*',
+    hlDone: () => '✅ *Task complete*',
+    hlNoRemotePrSuffix: () => ' (⚠️ no PR reflected to remote)',
+    resultFileLabel: ({ taskId }) => `Result file: \`.agent/tasks/done/${taskId}.md\``,
+    noRepoChanged: () => 'No repos changed, or push/PR creation failed. Check git/gh errors in the bot log.',
+    taskErrorHeadline: ({ taskId, isnPart, message }) => `❌ *Task error* (\`${taskId}\`)${isnPart}: ${message}`,
+    partialResultLabel: () => '🔀 Partial results:',
   },
   ja: {
     qnaAck: () => '💬 質問を確認しました。回答を準備中です…',
@@ -270,6 +312,25 @@ const MESSAGES = {
     gcIssueUsage: () => '使い方: `giip issue new "<title>"` | `list [status]` | `get <isn>` | `done|review|progress <isn>` | `comment <isn> <text>`',
     gcApiUsage: () => '使い方: `giip api <Verb> [jsondata]`',
     gcApiJsonParseFail: () => 'jsondata JSON のパースに失敗',
+    // [giip #1972] item 1 — startTaskExecution タスクライフサイクル(キュー登録/ブランチ失敗リトライ/DB 復元/完了・保留・未反映・エラー見出し)
+    taskUnknownHolder: () => '(不明)',
+    taskQueuedBusy: ({ occId, taskId }) => `⏸️ 現在 \`${occId}\` が作業ツリー(git)を占有中です。\n\`${taskId}\` を *キューに登録* しました — 占有作業が終わると *自動起動* します(再度 \`go\` 不要)。`,
+    taskBranchFailRetry: ({ n, max, error, taskId }) => `⏸️ *ブランチ作成失敗* (自動リトライ ${n}/${max}): ${error}\n\`${taskId}\` を *キューに登録* しました — まもなく *自動リトライ* します(\`go\` 不要)。`,
+    taskBranchFailExhausted: ({ max, error, taskId }) => `⏸️ *実行できません* (自動リトライ ${max}回を使い切りました): ${error}\n\`go ${taskId}\` で後ほど再実行してください。`,
+    repoMoreSuffix: () => ' 他',
+    repoManualNeeded: ({ repo, filesPart, reason }) => `⚠️ 手動対応が必要: ${repo}${filesPart} — ${reason}`,
+    repoBlockedLine: ({ repo, fileTxt, prTxt, branch }) => `🚧 保留: ${repo} — ファイル [${fileTxt}] が未マージ PR ${prTxt} 対象のため新規 PR を作成しませんでした(ブランチ \`${branch}\` は push 済み)。`,
+    commentsCountSuffix: ({ n }) => ` ${n}件`,
+    taskFileRestored: ({ isn, commentsPart }) => `🗄️ ローカルのタスクファイルが無いため giip issue #${isn} の DB 履歴(本文+コメント${commentsPart})から復元して処理します。`,
+    resumeGuideBlocked: ({ taskId }) => `⏸️ 先行 PR のマージ後 \`머지완료 ${taskId}\` と教えてくれれば base を pull→rebase して PR を作成します。`,
+    hlDoneBlocked: () => '⏸️ *作業完了 (一部 PR 保留)*',
+    hlDoneUnlanded: () => '⚠️ *作業完了 — 一部リポジトリの PR 未生成(手動必要)*',
+    hlDone: () => '✅ *作業完了*',
+    hlNoRemotePrSuffix: () => ' (⚠️ リモート反映された PR なし)',
+    resultFileLabel: ({ taskId }) => `結果ファイル: \`.agent/tasks/done/${taskId}.md\``,
+    noRepoChanged: () => '変更されたリポジトリが無いか、push/PR 生成に失敗しました。ボットログの git/gh エラーを確認してください。',
+    taskErrorHeadline: ({ taskId, isnPart, message }) => `❌ *作業エラー* (\`${taskId}\`)${isnPart}: ${message}`,
+    partialResultLabel: () => '🔀 部分結果:',
   },
 };
 
