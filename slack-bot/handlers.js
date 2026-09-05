@@ -1237,7 +1237,9 @@ async function handleChannelMention({ channelId, ts, threadTs, text, workDir = B
         const titleMatch = fc.match(/^# TASK:\s*(.+)$/m);
         const taskTitle = titleMatch ? titleMatch[1].trim() : `タスク ${targetId}`;
         const pendingKeyNew = `${channelId}:${replyTs}`;
-        taskState.pending[pendingKeyNew] = { taskId: targetId, taskTitle, taskFile: taskFileFallback, requestText: '', workDir };
+        const isnMatch = /^giip-(\d+)$/.exec(targetId);
+        const isn = isnMatch ? parseInt(isnMatch[1], 10) : undefined;
+        taskState.pending[pendingKeyNew] = { taskId: targetId, taskTitle, taskFile: taskFileFallback, requestText: '', workDir, isn };
         saveJSON(TASK_STATE_FILE, taskState);
         if (extraNote && tm.appendTaskNote(targetId, extraNote)) {
           await postMessage(channelId, `📎 追加指示 (${extraNote.length}字) を Task \`${targetId}\` に反映しました。`, replyTs);
