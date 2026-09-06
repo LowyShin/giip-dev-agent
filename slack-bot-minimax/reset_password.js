@@ -10,8 +10,19 @@
 
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 const bcrypt = require('bcryptjs');
 const { Client } = require('pg');
+
+function promptPassword(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
 
 function loadEnv(filePath) {
   try {
@@ -25,10 +36,10 @@ function loadEnv(filePath) {
 }
 
 // .env を探して読み込む
-const [,, email, newPassword, envArg] = process.argv;
+const [,, email, envArg] = process.argv;
 
-if (!email || !newPassword) {
-  console.error('使い方: node reset_password.js <email> <new_password> [.env_path]');
+if (!email) {
+  console.error('使い方: node reset_password.js <email> [.env_path]');
   process.exit(1);
 }
 
@@ -45,7 +56,7 @@ const dbConfig = {
   database: process.env.DB_NAME     || '',
   user:     process.env.DB_USER     || '',
   password: process.env.DB_PASSWORD || '',
-  ssl: (process.env.DB_SSLMODE || 'require') === 'disable' ? false : { rejectUnauthorized: false },
+  ssl: (process.env.DB_SSLMODE || 'require') === 'disable' ? false : { rejectUnauthorized: true },
 };
 
 if (!dbConfig.database || !dbConfig.user) {
@@ -55,6 +66,11 @@ if (!dbConfig.database || !dbConfig.user) {
 }
 
 (async () => {
+  const newPassword = await promptPassword('新しいパスワード: ');
+  if (!newPassword) {
+    console.error('エラー: パスワードが入力されていません。');
+    process.exit(1);
+  }
   const hashed = await bcrypt.hash(newPassword, 12);
   const client = new Client(dbConfig);
 
