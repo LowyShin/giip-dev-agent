@@ -4,6 +4,8 @@
 
 Optimizing server-side rendering and data fetching eliminates server-side waterfalls and reduces response times.
 
+> For SQL/stored-procedure work specifically, see [40_no_query_hints_at_scale.md](40_no_query_hints_at_scale.md) — never use query hints (e.g. `INDEX()`) to force execution plans at giip's scale.
+
 ### 3.1 Cross-Request LRU Caching
 
 **Impact: HIGH (caches across requests)**
